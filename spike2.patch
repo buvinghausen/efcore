@@ -1,0 +1,58 @@
+diff --git a/src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs b/src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs
+index 916f56c8c3..4b0ac06df7 100644
+--- a/src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs
++++ b/src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs
+@@ -177,6 +177,17 @@ is not { } principalColumns
+         }
+ 
+         var defaultName = foreignKey.GetDefaultName(storeObject, principalStoreObject, logger);
++
++        // SPIKE(constraint-overrides): throwaway composite-identity override lookup,
++        // keyed (dependent store object, principal store object).
++        if (defaultName != null
++            && foreignKey.FindAnnotation("Spike:ConstraintNameOverrides")?.Value
++                is Dictionary<(StoreObjectIdentifier, StoreObjectIdentifier), string> spikeOverrides
++            && spikeOverrides.TryGetValue((storeObject, principalStoreObject), out var spikeName))
++        {
++            return spikeName;
++        }
++
+         var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
+         return annotation != null && defaultName != null
+             ? (string?)annotation.Value
+diff --git a/src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs b/src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs
+index 430dd9519c..b225234c90 100644
+--- a/src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs
++++ b/src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs
+@@ -77,7 +77,7 @@ public static bool AreCompatible(
+         if (fragment != null)
+         {
+             return defaultName != null
+-                ? (string?)key[RelationalAnnotationNames.Name] ?? defaultName
++                ? SpikeFindNameOverride(key, storeObject) ?? (string?)key[RelationalAnnotationNames.Name] ?? defaultName
+                 : null;
+         }
+ 
+@@ -86,7 +86,7 @@ public static bool AreCompatible(
+             if (StoreObjectIdentifier.Create(containingType, storeObject.StoreObjectType) == storeObject)
+             {
+                 return defaultName != null
+-                    ? (string?)key[RelationalAnnotationNames.Name] ?? defaultName
++                    ? SpikeFindNameOverride(key, storeObject) ?? (string?)key[RelationalAnnotationNames.Name] ?? defaultName
+                     : null;
+             }
+         }
+@@ -94,6 +94,13 @@ public static bool AreCompatible(
+         return null;
+     }
+ 
++    // SPIKE(constraint-overrides): throwaway per-store-object key name override lookup.
++    private static string? SpikeFindNameOverride(IReadOnlyKey key, in StoreObjectIdentifier storeObject)
++        => key.FindAnnotation("Spike:NameOverrides")?.Value is Dictionary<StoreObjectIdentifier, string> overrides
++            && overrides.TryGetValue(storeObject, out var name)
++                ? name
++                : null;
++
+     /// <summary>
+     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+     ///     the same compatibility standards as public APIs. It may be changed or removed without notice in

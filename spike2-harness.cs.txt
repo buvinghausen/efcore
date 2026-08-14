@@ -1,0 +1,155 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Microsoft.EntityFrameworkCore;
+
+// SPIKE(constraint-overrides): throwaway harness for per-store-object key/FK constraint
+// name overrides (workstream B). Metadata + relational-model only; no database.
+public class ConstraintOverrideSpikeTest
+{
+    [Fact]
+    public void Key_override_produces_distinct_per_table_pk_names()
+    {
+        using var ctx = new SpikeContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model;
+        var pk = model.FindEntityType(typeof(SpikeUser))!.FindPrimaryKey()!;
+
+        Assert.Equal("pk_users_custom", pk.GetName(StoreObjectIdentifier.Table("Users")));
+        Assert.Equal("pk_user_lockout_custom", pk.GetName(StoreObjectIdentifier.Table("UserLockout")));
+    }
+
+    [Fact]
+    public void Key_override_flows_into_relational_model_unique_constraints()
+    {
+        using var ctx = new SpikeContext();
+        var relationalModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+
+        var users = relationalModel.FindTable("Users", null)!;
+        var lockout = relationalModel.FindTable("UserLockout", null)!;
+
+        Assert.Contains("pk_users_custom", users.UniqueConstraints.Select(c => c.Name));
+        Assert.Contains("pk_user_lockout_custom", lockout.UniqueConstraints.Select(c => c.Name));
+    }
+
+    [Fact]
+    public void Override_beats_global_name_annotation_preventing_collision()
+    {
+        // The NamingConventions #396 failure shape: a single global rewritten name would
+        // land on both tables; per-store-object overrides give each table its own name.
+        using var ctx = new SpikeContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model;
+        var pk = model.FindEntityType(typeof(SpikeUser))!.FindPrimaryKey()!;
+
+        var names = new[]
+        {
+            pk.GetName(StoreObjectIdentifier.Table("Users")), pk.GetName(StoreObjectIdentifier.Table("UserLockout")),
+        };
+        Assert.Equal(2, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void Fk_composite_override_resolves_and_flows_into_relational_model()
+    {
+        using var ctx = new SpikeContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model;
+        var fk = model.FindEntityType(typeof(SpikePost))!.GetForeignKeys().Single();
+
+        Assert.Equal(
+            "fk_posts_users_custom",
+            fk.GetConstraintName(StoreObjectIdentifier.Table("Posts"), StoreObjectIdentifier.Table("Users")));
+
+        var posts = model.GetRelationalModel().FindTable("Posts", null)!;
+        Assert.Contains("fk_posts_users_custom", posts.ForeignKeyConstraints.Select(c => c.Name));
+    }
+
+    [Fact]
+    public void Dump_linking_fk_constraints_for_report()
+    {
+        using var ctx = new SpikeContext();
+        var relationalModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+
+        var lines = relationalModel.Tables
+            .SelectMany(
+                t => t.ForeignKeyConstraints.Select(
+                    c =>
+                    {
+                        var mapped = c.MappedForeignKeys.Single();
+                        return $"{t.Name}: {c.Name} -> {c.PrincipalTable.Name}"
+                            + $" | model FK: {mapped.DeclaringEntityType.ShortName()}.[{string.Join(",", mapped.Properties.Select(p => p.Name))}]"
+                            + $" -> {mapped.PrincipalEntityType.ShortName()} unique={mapped.IsUnique} ownership={mapped.IsOwnership}";
+                    }))
+            .ToList();
+        lines.AddRange(
+            relationalModel.Tables.SelectMany(
+                t => t.UniqueConstraints.Select(c => $"{t.Name}: UC {c.Name} (PK: {c.GetIsPrimaryKey()})")));
+
+        System.IO.File.WriteAllText(
+            "/tmp/claude-1000/-home-buvy-code-buvinghausen-efcore/045bb6dc-e2c6-48ef-b050-4100333c68cb/scratchpad/spike2-constraints.txt",
+            string.Join('\n', lines));
+    }
+
+    private class SpikeContext : DbContext
+    {
+        public DbSet<SpikeUser> Users
+            => Set<SpikeUser>();
+
+        public DbSet<SpikePost> Posts
+            => Set<SpikePost>();
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseSqlServer("Server=unused;Database=Spike;Connect Timeout=1");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<SpikeUser>(
+                b =>
+                {
+                    b.ToTable("Users");
+                    b.SplitToTable(
+                        "UserLockout", s =>
+                        {
+                            s.Property(u => u.PasswordHash);
+                            s.Property(u => u.AccessFailedCount);
+                        });
+                });
+
+            modelBuilder.Entity<SpikePost>(b => b.ToTable("Posts"));
+
+            var pk = modelBuilder.Entity<SpikeUser>().Metadata.FindPrimaryKey()!;
+
+            // A global rewritten name (what NamingConventions sets today) plus per-table overrides.
+            ((IMutableKey)pk).SetName("pk_global_rewrite");
+            ((IMutableAnnotatable)pk).SetAnnotation(
+                "Spike:NameOverrides",
+                new Dictionary<StoreObjectIdentifier, string>
+                {
+                    [StoreObjectIdentifier.Table("Users")] = "pk_users_custom",
+                    [StoreObjectIdentifier.Table("UserLockout")] = "pk_user_lockout_custom",
+                });
+
+            var fk = modelBuilder.Entity<SpikePost>().Metadata.GetForeignKeys().Single();
+            ((IMutableAnnotatable)fk).SetAnnotation(
+                "Spike:ConstraintNameOverrides",
+                new Dictionary<(StoreObjectIdentifier, StoreObjectIdentifier), string>
+                {
+                    [(StoreObjectIdentifier.Table("Posts"), StoreObjectIdentifier.Table("Users"))] = "fk_posts_users_custom",
+                });
+        }
+    }
+
+    public class SpikeUser
+    {
+        public Guid Id { get; set; }
+        public string? Email { get; set; }
+        public string? PasswordHash { get; set; }
+        public int AccessFailedCount { get; set; }
+        public List<SpikePost> Posts { get; set; } = [];
+    }
+
+    public class SpikePost
+    {
+        public Guid Id { get; set; }
+        public Guid AuthorId { get; set; }
+        public SpikeUser? Author { get; set; }
+    }
+}
