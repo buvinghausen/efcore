@@ -1,0 +1,123 @@
+diff --git a/src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs b/src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs
+index 1c058b1cca..becc654188 100644
+--- a/src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs
++++ b/src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs
+@@ -1,6 +1,9 @@
+ // Licensed to the .NET Foundation under one or more agreements.
+ // The .NET Foundation licenses this file to you under the MIT license.
+ 
++using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
++using Microsoft.EntityFrameworkCore.SqlServer.Metadata.Internal;
++
+ namespace Microsoft.EntityFrameworkCore.SqlServer.Query.Internal;
+ 
+ /// <summary>
+@@ -33,6 +36,10 @@ public override Expression Process(Expression query)
+     {
+         var query1 = base.Process(query);
+ 
++        // SPIKE(temporal-split): after pruning, reject any surviving table that is a
++        // non-temporal fragment of an entity queried with a temporal operator.
++        SpikeCheckTemporalFragmentSurvivors(query1);
++
+         var query2 = _jsonPostprocessor.Process(query1);
+         var query3 = _aggregatePostprocessor.Visit(query2);
+ 
+@@ -59,4 +66,76 @@ protected override Expression ProcessTypeMappings(Expression expression)
+     /// </summary>
+     protected override Expression Prune(Expression query)
+         => _pruner.Prune(query);
++
++    // SPIKE(temporal-split): throwaway survivor check — walks the pruned tree; if any table
++    // expression carrying a temporal-operation annotation shares an entity with a mapping
++    // fragment whose table also survived pruning, the query depends on non-temporal fragment
++    // data and is rejected with a guided error.
++    private static void SpikeCheckTemporalFragmentSurvivors(Expression query)
++    {
++        var collector = new SpikeTableCollector();
++        collector.Visit(query);
++
++        if (collector.StampedTables.Count == 0)
++        {
++            return;
++        }
++
++        var bannedFragmentTables = new HashSet<(string Name, string? Schema)>();
++        foreach (var stamped in collector.StampedTables)
++        {
++            foreach (var mapping in stamped.EntityTypeMappings)
++            {
++                if (mapping.TypeBase is IEntityType entityType)
++                {
++                    foreach (var fragment in entityType.GetMappingFragments(StoreObjectType.Table))
++                    {
++                        bannedFragmentTables.Add((fragment.StoreObject.Name, fragment.StoreObject.Schema));
++                    }
++                }
++            }
++        }
++
++        var survivors = collector.AllTables
++            .Where(t => bannedFragmentTables.Contains((t.Name, t.Schema)))
++            .Select(t => t.Name)
++            .Distinct()
++            .ToList();
++
++        if (survivors.Count > 0)
++        {
++            throw new InvalidOperationException(
++                "SPIKE: The temporal query requires members mapped to non-temporal fragment table(s) "
++                + string.Join(", ", survivors)
++                + ". Project only members mapped to the principal table.");
++        }
++    }
++
++    private sealed class SpikeTableCollector : ExpressionVisitor
++    {
++        public List<ITableBase> StampedTables { get; } = [];
++        public List<ITableBase> AllTables { get; } = [];
++
++        protected override Expression VisitExtension(Expression node)
++        {
++            switch (node)
++            {
++                case TableExpression tableExpression:
++                    AllTables.Add(tableExpression.Table);
++                    if (tableExpression.FindAnnotation(SqlServerAnnotationNames.TemporalOperationType) is not null)
++                    {
++                        StampedTables.Add(tableExpression.Table);
++                    }
++
++                    return node;
++
++                case ShapedQueryExpression shapedQueryExpression:
++                    Visit(shapedQueryExpression.QueryExpression);
++                    return node;
++
++                default:
++                    return base.VisitExtension(node);
++            }
++        }
++    }
+ }
+diff --git a/src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs b/src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs
+index 97dc0774d9..7355842053 100644
+--- a/src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs
++++ b/src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs
+@@ -375,6 +375,16 @@ protected override Expression VisitExtension(Expression extensionExpression)
+                 _ => throw new InvalidOperationException(queryRootExpression.Print()),
+             };
+ 
++            // SPIKE(temporal-split): stamp only the entity's principal (temporal) table; leave
++            // non-temporal fragment tables unannotated so the pruner can remove unreferenced ones.
++            var spikeRootTableName = queryRootExpression.EntityType.GetTableName();
++            var spikeRootSchema = queryRootExpression.EntityType.GetSchema();
++            var spikeInnerFunc = annotationApplyingFunc;
++            annotationApplyingFunc = te =>
++                te.Table.Name == spikeRootTableName && te.Table.Schema == spikeRootSchema
++                    ? spikeInnerFunc(te)
++                    : te;
++
+             selectExpression = (SelectExpression)new TemporalAnnotationApplyingExpressionVisitor(annotationApplyingFunc)
+                 .Visit(selectExpression);
+ 

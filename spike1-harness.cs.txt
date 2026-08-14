@@ -1,0 +1,232 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Microsoft.EntityFrameworkCore;
+
+// SPIKE(temporal-split): throwaway harness for the prune-based temporal entity-splitting
+// query mechanism. Translation-only (ToQueryString / translation exceptions); no database.
+public class TemporalSplitSpikeTest
+{
+    private static readonly DateTime Point = new(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void Root_projection_prunes_fragment_and_stamps_temporal()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.TemporalAsOf(Point).Select(u => new { u.Email, u.Phone }).ToQueryString();
+
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+    }
+
+    [Fact]
+    public void Fragment_projection_is_rejected_with_guided_error()
+    {
+        using var ctx = new SpikeContext();
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ctx.Users.TemporalAsOf(Point).Select(u => u.PasswordHash).ToQueryString());
+
+        Assert.Contains("SPIKE", ex.Message);
+        Assert.Contains("UserLockout", ex.Message);
+    }
+
+    [Fact]
+    public void Where_on_root_with_root_projection_succeeds()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.TemporalAsOf(Point).Where(u => u.Email != null).Select(u => u.Email).ToQueryString();
+
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+    }
+
+    [Fact]
+    public void Where_on_fragment_is_rejected()
+    {
+        using var ctx = new SpikeContext();
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ctx.Users.TemporalAsOf(Point).Where(u => u.AccessFailedCount > 0).Select(u => u.Email).ToQueryString());
+
+        Assert.Contains("SPIKE", ex.Message);
+    }
+
+    [Fact]
+    public void OrderBy_fragment_is_rejected_and_orderby_root_succeeds()
+    {
+        using var ctx = new SpikeContext();
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ctx.Users.TemporalAsOf(Point).OrderBy(u => u.AccessFailedCount).Select(u => u.Email).ToQueryString());
+        Assert.Contains("SPIKE", ex.Message);
+
+        var sql = ctx.Users.TemporalAsOf(Point).OrderBy(u => u.Email).Select(u => u.Email).ToQueryString();
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+    }
+
+    [Fact]
+    public void GroupBy_root_succeeds()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.TemporalAsOf(Point)
+            .GroupBy(u => u.Email)
+            .Select(g => new { g.Key, N = g.Count() })
+            .ToQueryString();
+
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+    }
+
+    [Fact]
+    public void Full_entity_materialization_is_rejected()
+    {
+        using var ctx = new SpikeContext();
+        var ex = Assert.Throws<InvalidOperationException>(() => ctx.Users.TemporalAsOf(Point).ToQueryString());
+
+        Assert.Contains("SPIKE", ex.Message);
+    }
+
+    [Fact]
+    public void Count_and_Any_translate_without_fragment()
+    {
+        using var ctx = new SpikeContext();
+
+        // Terminal operators execute, so translation success shows up as a connection
+        // failure (unreachable server) rather than our translation error.
+        var countEx = Record.Exception(() => ctx.Users.TemporalAsOf(Point).Count());
+        Assert.NotNull(countEx);
+        Assert.DoesNotContain("SPIKE", countEx.Message);
+
+        var anyEx = Record.Exception(() => ctx.Users.TemporalAsOf(Point).Any(u => u.Email != null));
+        Assert.NotNull(anyEx);
+        Assert.DoesNotContain("SPIKE", anyEx.Message);
+    }
+
+    [Fact]
+    public void Set_operation_over_root_projections_succeeds()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.TemporalAsOf(Point).Select(u => u.Email)
+            .Concat(ctx.Users.TemporalAsOf(Point).Select(u => u.Phone))
+            .ToQueryString();
+
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+    }
+
+    [Fact]
+    public void Correlated_subquery_root_only_succeeds_fragment_rejected()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.TemporalAsOf(Point)
+            .Select(u => new { u.Email, N = ctx.Users.TemporalAsOf(Point).Count(x => x.Email == u.Email) })
+            .ToQueryString();
+        Assert.Contains("FOR SYSTEM_TIME AS OF", sql);
+        Assert.DoesNotContain("UserLockout", sql);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ctx.Users.TemporalAsOf(Point)
+                .Select(u => new { u.Email, N = ctx.Users.TemporalAsOf(Point).Count(x => x.AccessFailedCount > 0) })
+                .ToQueryString());
+        Assert.Contains("SPIKE", ex.Message);
+    }
+
+    [Fact]
+    public void Compiled_query_temporal_on_non_split_entity_control()
+    {
+        // Control: EF.CompileQuery + TemporalAsOf on a plain (non-split) temporal entity.
+        var compiled = EF.CompileQuery(
+            (SpikeContext c, DateTime t) => c.Audits.TemporalAsOf(t).Select(a => a.Id));
+
+        using var ctx = new SpikeContext();
+        var ex = Record.Exception(() => compiled(ctx, Point).ToList());
+
+        Assert.NotNull(ex);
+        Assert.IsType<ArgumentException>(ex);
+    }
+
+    [Fact]
+    public void Compiled_query_split_matches_preexisting_temporal_limitation()
+    {
+        // EF.CompileQuery + temporal operators fails in the funcletizer for ALL temporal
+        // entities (see control test above) — pre-existing upstream limitation; the split
+        // scenario never reaches translation, so the spike mechanism is not exercised here.
+        var compiled = EF.CompileQuery(
+            (SpikeContext c, DateTime t) => c.Users.TemporalAsOf(t).Where(u => u.AccessFailedCount > 0).Select(u => u.Email));
+
+        using var ctx = new SpikeContext();
+        var ex = Record.Exception(() => compiled(ctx, Point).ToList());
+
+        Assert.NotNull(ex);
+        Assert.IsType<ArgumentException>(ex);
+        Assert.DoesNotContain("SPIKE", ex.Message);
+    }
+
+    [Fact]
+    public void Dump_sql_samples_for_report()
+    {
+        using var ctx = new SpikeContext();
+        var samples =
+            "== root projection ==\n"
+            + ctx.Users.TemporalAsOf(Point).Select(u => new { u.Email, u.Phone }).ToQueryString()
+            + "\n\n== TemporalAll root projection ==\n"
+            + ctx.Users.TemporalAll().Select(u => u.Email).ToQueryString()
+            + "\n\n== non-temporal full entity (control) ==\n"
+            + ctx.Users.ToQueryString();
+        System.IO.File.WriteAllText("/tmp/claude-1000/-home-buvy-code-buvinghausen-efcore/045bb6dc-e2c6-48ef-b050-4100333c68cb/scratchpad/spike1-sql-samples.txt", samples);
+    }
+
+    [Fact]
+    public void Non_temporal_query_over_split_entity_is_unaffected()
+    {
+        using var ctx = new SpikeContext();
+        var sql = ctx.Users.ToQueryString();
+
+        Assert.Contains("UserLockout", sql);
+        Assert.DoesNotContain("FOR SYSTEM_TIME", sql);
+    }
+
+    private class SpikeContext : DbContext
+    {
+        public DbSet<SpikeUser> Users
+            => Set<SpikeUser>();
+
+        public DbSet<SpikeAudit> Audits
+            => Set<SpikeAudit>();
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseSqlServer(
+                "Server=127.0.0.1,1;Database=Spike;User Id=x;Password=x;Connect Timeout=1;TrustServerCertificate=True");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<SpikeUser>(
+                b =>
+                {
+                    b.ToTable("Users", tb => tb.IsTemporal());
+                    b.SplitToTable(
+                        "UserLockout", s =>
+                        {
+                            s.Property(u => u.PasswordHash);
+                            s.Property(u => u.AccessFailedCount);
+                        });
+                });
+
+            modelBuilder.Entity<SpikeAudit>(b => b.ToTable("Audits", tb => tb.IsTemporal()));
+        }
+    }
+
+    public class SpikeAudit
+    {
+        public Guid Id { get; set; }
+        public string? What { get; set; }
+    }
+
+    public class SpikeUser
+    {
+        public Guid Id { get; set; }
+        public string? Email { get; set; }
+        public string? Phone { get; set; }
+        public string? PasswordHash { get; set; }
+        public int AccessFailedCount { get; set; }
+    }
+}
