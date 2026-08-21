@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-14 (rev. 3 after second design review)
 **Author:** Brian Buvinghausen (with Claude)
-**Status:** Spike-validated — both §7 gates passed 2026-08-14 ([Spike 1](2026-08-14-spike1-query-findings.md): prune-based query mechanism, 14/14; [Spike 2](2026-08-14-spike2-constraint-overrides-findings.md): composite key/FK overrides, 5/5); ready for implementation planning. Migrations zero-generator-change remains a tested hypothesis (§3.3); TPT/temporal-fragment period ownership remains deferred (§8)
+**Status:** Spike-validated — both §7 gates passed 2026-08-14 ([Spike 1](2026-08-14-spike1-query-findings.md): prune-based query mechanism, 14/14; [Spike 2](2026-08-14-spike2-constraint-overrides-findings.md): composite key/FK overrides, 5/5); implementation plan written 2026-08-21 ([plan](2026-08-21-temporal-entity-splitting-implementation-plan.md)). Migrations zero-generator-change remains a tested hypothesis (§3.3); TPT/temporal-fragment period ownership remains deferred (§8)
 **Upstream anchors:** [dotnet/efcore#26457](https://github.com/dotnet/efcore/issues/26457) (workstream A), [dotnet/efcore#27972](https://github.com/dotnet/efcore/issues/27972) + [dotnet/efcore#27971](https://github.com/dotnet/efcore/issues/27971) (workstream B)
 **Related:** [dotnet/efcore#30366](https://github.com/dotnet/efcore/issues/30366) (NRE repro, closed as dup of #26457), [efcore/EFCore.NamingConventions#396](https://github.com/efcore/EFCore.NamingConventions/pull/396)
 **Code evidence:** all file:line references are against dotnet/efcore `main` @ `5e8896500e` (2026-08).
