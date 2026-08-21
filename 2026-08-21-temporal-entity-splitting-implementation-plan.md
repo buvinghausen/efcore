@@ -10,7 +10,7 @@
 
 **Spec:** `2026-08-14-temporal-entity-splitting-design.md` (rev 3.1, spike-validated) on this same orphan `specs` branch. Spike evidence: `2026-08-14-spike1-query-findings.md`, `2026-08-14-spike2-constraint-overrides-findings.md`, with the throwaway patches archived as `spike1.patch` / `spike2.patch`. **Read the spec before starting — this plan argues from it and does not restate its rationale.**
 
-**Scope note:** Workstream A and Workstream B are independent subsystems shipping as separate upstream PRs; spec §7 states A has no implementation dependency on B. They are combined into one document at the author's request, but Phase A (Tasks A1–A14) and Phase B (Tasks B1–B10) are each independently shippable and each ends in a green build with tests. If you are executing only one workstream, execute one phase and ignore the other.
+**Scope note:** Workstream A and Workstream B are independent subsystems shipping as separate upstream PRs; spec §7 states A has no implementation dependency on B. They are combined into one document at the author's request, but Phase B (Tasks B1–B10, presented first) and Phase A (Tasks A1–A14) are each independently shippable and each ends in a green build with tests. If you are executing only one workstream, execute one phase and ignore the other.
 
 ---
 
@@ -34,58 +34,24 @@ These apply to **every** task. They are not repeated per task.
 
 ## Sequencing and PR mapping
 
-The spec (§7) prefers Workstream B upstream first because it is smaller and less controversial in API review, but explicitly records that A does not depend on B. This plan implements **A first** because A is the driving use case (asymmetric temporal Identity `Users`) and unblocks the companion package.
+Spec §7 prefers Workstream B upstream first — smaller, provider-neutral, least controversial in API review — and this plan follows that order. One thing reinforces it that the spec states but does not connect to sequencing: **Workstream B has no interim delivery path.** Spec §5 records that B is not companionable, because `GetName(storeObject)` is a static extension consumed during relational model construction and no DI service replacement can intercept it. B therefore pays off *only* when upstream merges it, so its review clock is the thing worth starting early. Workstream A ships through the companion package on your own timeline, independent of upstream review latency.
+
+**The order is a preference, not a constraint.** The two phases touch disjoint assemblies — Phase B is `EFCore.Relational` + `EFCore.Design`, Phase A is `EFCore.SqlServer` — with no shared files and no cross-phase task references. Nor is there a packaging constraint: `EFCore.SqlServer` project-references `EFCore.Relational` in-repo (`src/EFCore.SqlServer/EFCore.SqlServer.csproj:48`, with `PackageVersion="[$(Version), $(NextMajorVersion))"`), and both are stamped with the same `VersionPrefix` from `eng/Versions.props`, so they ship in lockstep from one commit with no version boundary to sequence across. If Phase A's use case becomes urgent, swap the two phases and nothing else changes — spec §7 explicitly allows A to proceed independently if B stalls in API review.
 
 | Order | Work | Branch | Upstream destination |
 |---|---|---|---|
-| 1 | Phase A, Tasks A1–A14 | `feature/temporal-entity-splitting` | Design comment on [#26457](https://github.com/dotnet/efcore/issues/26457) **before** the PR, then the PR |
-| 2 | Phase B, Tasks B1–B10 | `feature/per-store-object-constraint-names` | PR anchored on [#27972](https://github.com/dotnet/efcore/issues/27972) / [#27971](https://github.com/dotnet/efcore/issues/27971) |
+| 1 | Phase B, Tasks B1–B10 | `feature/per-store-object-constraint-names` | PR anchored on [#27972](https://github.com/dotnet/efcore/issues/27972) / [#27971](https://github.com/dotnet/efcore/issues/27971) |
+| 2 | Phase A, Tasks A1–A14 | `feature/temporal-entity-splitting` | Design comment on [#26457](https://github.com/dotnet/efcore/issues/26457) **before** the PR, then the PR |
 | 3 | Companion package | separate repo | n/a — not covered by this plan (spec §5) |
 | 4 | NamingConventions follow-up | efcore/EFCore.NamingConventions | consumes Phase B once merged |
 
-Branch both feature branches from `main`. They touch disjoint files and can be developed in either order or in parallel worktrees.
+Branch both feature branches from `main`; neither builds on the other, so Phase A does **not** branch from the Phase B branch.
 
 **Explicitly out of scope for this plan:** the companion NuGet package (spec §5) and the NamingConventions follow-up PR (spec §7 item 6). Both are downstream of merged code and are separate deliverables.
 
 ---
 
 ## File Structure
-
-### Phase A — Workstream A (`EFCore.SqlServer`)
-
-**Create:**
-
-| File | Responsibility |
-|---|---|
-| `src/EFCore.SqlServer/Metadata/Internal/SqlServerTemporalMetadata.cs` | The single internal resolution surface: fragment-aware `IsTemporal(entityType, storeObject)`, the `ITable`-level consensus reader, and the period-property lookup that goes through column mappings rather than enumeration order. Every other site consumes this file and nothing re-derives resolution locally. |
-| `src/EFCore.SqlServer/Query/Internal/SqlServerTemporalFragmentSurvivorVerifier.cs` | The §3.4 step-4 postprocessing check: walks the pruned tree, correlates temporal-annotated table expressions to their entity types' non-temporal fragment tables, throws the guided error on a survivor. Kept out of `SqlServerQueryTranslationPostprocessor` so the postprocessor stays a thin pipeline. |
-
-**Modify:**
-
-| File | Change |
-|---|---|
-| `src/EFCore.SqlServer/Extensions/SqlServerEntityTypeMappingFragmentExtensions.cs` | Add the four public fragment temporal extensions. |
-| `src/EFCore.SqlServer/Extensions/SqlServerTableBuilderExtensions.cs` | Add `IsTemporal(bool)` to `SplitTableBuilder`, `SplitTableBuilder<TEntity>`, `OwnedNavigationSplitTableBuilder`, `OwnedNavigationSplitTableBuilder<,>`. |
-| `src/EFCore.SqlServer/Infrastructure/Internal/SqlServerModelValidator.cs` | Add the fragment state-machine pass; revise `ValidateTemporalTableSplitting` into a per-`ITable` consensus check. |
-| `src/EFCore.SqlServer/Metadata/Internal/SqlServerAnnotationProvider.cs` | Replace both unfiltered `EntityTypeMappings.First()` reads (`For(ITable)`, `For(IColumn)`) with the consensus reader. This is the #30366 fix. |
-| `src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs` | Stamp the temporal annotation selectively. |
-| `src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs` | Invoke the survivor verifier after `base.Process`. |
-| `src/EFCore.SqlServer/Metadata/Conventions/SqlServerRuntimeModelConvention.cs` | Carry the fragment facet into the runtime model. |
-| `src/EFCore.SqlServer/Design/Internal/SqlServerAnnotationCodeGenerator.cs` | Emit `t.IsTemporal(false)` sugar for fragments in snapshots and scaffolded configuration. |
-| `src/EFCore.SqlServer/Properties/SqlServerStrings.resx` + `.Designer.cs` | Four new error strings. |
-| `src/EFCore.SqlServer/EFCore.SqlServer.baseline.json` | New public API entries. |
-
-**Test:**
-
-| File | Coverage |
-|---|---|
-| `test/EFCore.SqlServer.Tests/Infrastructure/SqlServerModelValidatorTest.cs` | The full §3.2 seven-row state machine, period-property-split rejection, unsupported-mapping-kind rejection, per-`ITable` consensus. |
-| `test/EFCore.SqlServer.Tests/Metadata/SqlServerMetadataExtensionsTest.cs` | Fragment facet get/set/configuration-source; store-object resolution fallback. |
-| `test/EFCore.SqlServer.FunctionalTests/ModelBuilding/SqlServerModelBuilderTestBase.cs` | Fluent surface round-trip through both generic and non-generic builders. |
-| `test/EFCore.SqlServer.FunctionalTests/ModelBuilding/SqlServerTestModelBuilderExtensions.cs` | `IsTemporal` shims for `TestSplitTableBuilder<TEntity>`. |
-| `test/EFCore.SqlServer.FunctionalTests/Migrations/MigrationsSqlServerTest.TemporalTables.cs` | The §3.3 acceptance-gate migration matrix and the populated-database transition test. |
-| `test/EFCore.SqlServer.FunctionalTests/Query/TemporalSplitEntitySqlServerTest.cs` *(new)* | The §3.4 query matrix: root-only shapes succeed with single-table `FOR SYSTEM_TIME`; every fragment-dependent shape hits the guided error. |
-| `test/EFCore.SqlServer.FunctionalTests/Scaffolding/CompiledModelSqlServerTest.cs` | Compiled-model round-trip of the fragment facet. |
 
 ### Phase B — Workstream B (`EFCore.Relational`)
 
@@ -125,9 +91,1601 @@ Branch both feature branches from `main`. They touch disjoint files and can be d
 | `test/EFCore.Relational.Tests/Migrations/Internal/MigrationsModelDifferTest.cs` | Per-table PK/linking-FK names reaching migration operations. |
 | `test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs` | Runtime-model round-trip. |
 
+### Phase A — Workstream A (`EFCore.SqlServer`)
+
+**Create:**
+
+| File | Responsibility |
+|---|---|
+| `src/EFCore.SqlServer/Metadata/Internal/SqlServerTemporalMetadata.cs` | The single internal resolution surface: fragment-aware `IsTemporal(entityType, storeObject)`, the `ITable`-level consensus reader, and the period-property lookup that goes through column mappings rather than enumeration order. Every other site consumes this file and nothing re-derives resolution locally. |
+| `src/EFCore.SqlServer/Query/Internal/SqlServerTemporalFragmentSurvivorVerifier.cs` | The §3.4 step-4 postprocessing check: walks the pruned tree, correlates temporal-annotated table expressions to their entity types' non-temporal fragment tables, throws the guided error on a survivor. Kept out of `SqlServerQueryTranslationPostprocessor` so the postprocessor stays a thin pipeline. |
+
+**Modify:**
+
+| File | Change |
+|---|---|
+| `src/EFCore.SqlServer/Extensions/SqlServerEntityTypeMappingFragmentExtensions.cs` | Add the four public fragment temporal extensions. |
+| `src/EFCore.SqlServer/Extensions/SqlServerTableBuilderExtensions.cs` | Add `IsTemporal(bool)` to `SplitTableBuilder`, `SplitTableBuilder<TEntity>`, `OwnedNavigationSplitTableBuilder`, `OwnedNavigationSplitTableBuilder<,>`. |
+| `src/EFCore.SqlServer/Infrastructure/Internal/SqlServerModelValidator.cs` | Add the fragment state-machine pass; revise `ValidateTemporalTableSplitting` into a per-`ITable` consensus check. |
+| `src/EFCore.SqlServer/Metadata/Internal/SqlServerAnnotationProvider.cs` | Replace both unfiltered `EntityTypeMappings.First()` reads (`For(ITable)`, `For(IColumn)`) with the consensus reader. This is the #30366 fix. |
+| `src/EFCore.SqlServer/Query/Internal/SqlServerQueryableMethodTranslatingExpressionVisitor.cs` | Stamp the temporal annotation selectively. |
+| `src/EFCore.SqlServer/Query/Internal/SqlServerQueryTranslationPostprocessor.cs` | Invoke the survivor verifier after `base.Process`. |
+| `src/EFCore.SqlServer/Metadata/Conventions/SqlServerRuntimeModelConvention.cs` | Carry the fragment facet into the runtime model. |
+| `src/EFCore.SqlServer/Design/Internal/SqlServerAnnotationCodeGenerator.cs` | Emit `t.IsTemporal(false)` sugar for fragments in snapshots and scaffolded configuration. |
+| `src/EFCore.SqlServer/Properties/SqlServerStrings.resx` + `.Designer.cs` | Four new error strings. |
+| `src/EFCore.SqlServer/EFCore.SqlServer.baseline.json` | New public API entries. |
+
+**Test:**
+
+| File | Coverage |
+|---|---|
+| `test/EFCore.SqlServer.Tests/Infrastructure/SqlServerModelValidatorTest.cs` | The full §3.2 seven-row state machine, period-property-split rejection, unsupported-mapping-kind rejection, per-`ITable` consensus. |
+| `test/EFCore.SqlServer.Tests/Metadata/SqlServerMetadataExtensionsTest.cs` | Fragment facet get/set/configuration-source; store-object resolution fallback. |
+| `test/EFCore.SqlServer.FunctionalTests/ModelBuilding/SqlServerModelBuilderTestBase.cs` | Fluent surface round-trip through both generic and non-generic builders. |
+| `test/EFCore.SqlServer.FunctionalTests/ModelBuilding/SqlServerTestModelBuilderExtensions.cs` | `IsTemporal` shims for `TestSplitTableBuilder<TEntity>`. |
+| `test/EFCore.SqlServer.FunctionalTests/Migrations/MigrationsSqlServerTest.TemporalTables.cs` | The §3.3 acceptance-gate migration matrix and the populated-database transition test. |
+| `test/EFCore.SqlServer.FunctionalTests/Query/TemporalSplitEntitySqlServerTest.cs` *(new)* | The §3.4 query matrix: root-only shapes succeed with single-table `FOR SYSTEM_TIME`; every fragment-dependent shape hits the guided error. |
+| `test/EFCore.SqlServer.FunctionalTests/Scaffolding/CompiledModelSqlServerTest.cs` | Compiled-model round-trip of the fragment facet. |
+
+---
+# Phase B — Workstream B: per-store-object key and FK constraint names
+
+**Execute first.** See *Sequencing and PR mapping* above — the order is a preference, and the phases are independent.
+
+Branch: `git switch -c feature/per-store-object-constraint-names main`
+
+**What Spike 2 established, and what it did not.** The spike proved the *resolution* seams are exactly two functions and that the relational model consumes them untouched (5/5 green). What it explicitly shortcut — and what this phase must build properly — is the metadata family around them: typed override objects with configuration sources instead of raw `Dictionary` annotations, a convention-builder API instead of post-convention `OnModelCreating` writes, attach/merge survival, runtime-model conversion, snapshot codegen, and explicit-null semantics.
+
+**The identity asymmetry is the crux.** Key overrides are keyed by a single `StoreObjectIdentifier` — a PK/AK constraint materializes once per table. FK constraint-name resolution is a **table-pair** relationship (`GetConstraintName(in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`), and Spike 2 finding 1 confirmed why that matters: the entity-splitting linking constraint on every fragment maps to **one** self-referential model FK, so a single-store-object override could never name two fragments' linking constraints apart.
+
+### Task B1: Key override metadata family
+
+Mirrors `RelationalPropertyOverrides` — read `src/EFCore.Relational/Metadata/Internal/RelationalPropertyOverrides.cs` end to end before starting; this task is that file's structure with `Property` → `Key` and `ColumnName` → `Name`.
+
+**Files:**
+- Modify: `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`
+- Create: `src/EFCore.Relational/Metadata/IReadOnlyRelationalKeyOverrides.cs`, `IMutableRelationalKeyOverrides.cs`, `IConventionRelationalKeyOverrides.cs`, `IRelationalKeyOverrides.cs`
+- Create: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`
+- Create: `src/EFCore.Relational/Metadata/Builders/IConventionRelationalKeyOverridesBuilder.cs`, `src/EFCore.Relational/Metadata/Internal/InternalRelationalKeyOverridesBuilder.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs` *(new)*
+
+**Interfaces:**
+- Consumes: nothing (first task of Phase B).
+- Produces:
+  - `RelationalAnnotationNames.KeyOverrides` (`"Relational:KeyOverrides"`)
+  - `static IReadOnlyRelationalKeyOverrides? RelationalKeyOverrides.Find(IReadOnlyKey key, in StoreObjectIdentifier storeObject)`
+  - `static IEnumerable<IReadOnlyRelationalKeyOverrides>? RelationalKeyOverrides.Get(IReadOnlyKey key)`
+  - `static RelationalKeyOverrides RelationalKeyOverrides.GetOrCreate(IMutableKey key, in StoreObjectIdentifier storeObject, ConfigurationSource configurationSource)`
+  - `static RelationalKeyOverrides? RelationalKeyOverrides.Remove(IMutableKey key, in StoreObjectIdentifier storeObject)`
+  - instance members `StoreObject`, `Name`, `SetName(string?, ConfigurationSource)`, `IsNameOverridden`, `GetNameConfigurationSource()`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`:
+
+```csharp
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Microsoft.EntityFrameworkCore.Metadata;
+
+public class RelationalKeyOverridesTest
+{
+    [ConditionalFact]
+    public void Key_overrides_are_stored_per_store_object_with_configuration_sources()
+    {
+        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<Customer>().ToTable("Customers");
+
+        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+        var customers = StoreObjectIdentifier.Table("Customers");
+        var details = StoreObjectIdentifier.Table("CustomerDetails");
+
+        Assert.Null(RelationalKeyOverrides.Find(key, customers));
+
+        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
+        overrides.SetName("pk_customers", ConfigurationSource.Explicit);
+
+        Assert.Equal("pk_customers", RelationalKeyOverrides.Find(key, customers)!.Name);
+        Assert.True(RelationalKeyOverrides.Find(key, customers)!.IsNameOverridden);
+        Assert.Null(RelationalKeyOverrides.Find(key, details));
+
+        // A convention-source write must not clobber an explicit one.
+        RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Convention)
+            .SetName("pk_convention", ConfigurationSource.Convention);
+        Assert.Equal("pk_customers", RelationalKeyOverrides.Find(key, customers)!.Name);
+    }
+
+    [ConditionalFact]
+    public void Explicit_null_name_override_is_distinguishable_from_unset()
+    {
+        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<Customer>().ToTable("Customers");
+
+        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+        var customers = StoreObjectIdentifier.Table("Customers");
+
+        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
+        overrides.SetName(null, ConfigurationSource.Explicit);
+
+        // Set-to-null means "suppress the name for this store object", not "no override configured".
+        Assert.True(overrides.IsNameOverridden);
+        Assert.Null(overrides.Name);
+    }
+
+    [ConditionalFact]
+    public void Removing_an_override_detaches_it_from_the_model()
+    {
+        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<Customer>().ToTable("Customers");
+
+        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+        var customers = StoreObjectIdentifier.Table("Customers");
+
+        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
+        Assert.True(overrides.IsInModel);
+
+        Assert.Same(overrides, RelationalKeyOverrides.Remove(key, customers));
+        Assert.False(overrides.IsInModel);
+        Assert.Null(RelationalKeyOverrides.Find(key, customers));
+    }
+
+    private class Customer
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = null!;
+    }
+}
+```
+
+The `SetName` precedence assertion in the first test is the *semantic* being specified: `ConfigurationSource.Max` on write, so a convention cannot lower an explicit value. That mirrors `RelationalPropertyOverrides.SetColumnName`.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: compile error — `RelationalKeyOverrides` does not exist.
+
+- [ ] **Step 3: Add the annotation name**
+
+In `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`, next to `RelationalOverrides` (`:325`):
+
+```csharp
+    /// <summary>
+    ///     The name for per-store-object key constraint name overrides.
+    /// </summary>
+    public const string KeyOverrides = Prefix + "KeyOverrides";
+```
+
+and add `KeyOverrides` to the `AllNames` array around `:442`.
+
+- [ ] **Step 4: Create the interface quartet**
+
+Copy `IReadOnlyRelationalPropertyOverrides.cs`, `IMutableRelationalPropertyOverrides.cs`, `IConventionRelationalPropertyOverrides.cs`, and `IRelationalPropertyOverrides.cs` to the `*RelationalKeyOverrides*` equivalents, applying exactly these substitutions and nothing else:
+
+| In the property-overrides file | In the key-overrides file |
+|---|---|
+| `RelationalPropertyOverrides` | `RelationalKeyOverrides` |
+| `Property` (the member and its types `IReadOnlyProperty`/`IMutableProperty`/`IConventionProperty`/`IProperty`) | `Key` (`IReadOnlyKey`/`IMutableKey`/`IConventionKey`/`IKey`) |
+| `ColumnName` | `Name` |
+| `IsColumnNameOverridden` | `IsNameOverridden` |
+| `GetColumnNameConfigurationSource` | `GetNameConfigurationSource` |
+| `SetColumnName` | `SetName` |
+| `RemoveColumnNameOverride` | `RemoveNameOverride` |
+
+Keep the `<summary>` text meaningful — rewrite "column name" as "key constraint name" rather than leaving the property wording in place.
+
+- [ ] **Step 5: Create `RelationalKeyOverrides`**
+
+Apply the same substitution table to `src/EFCore.Relational/Metadata/Internal/RelationalPropertyOverrides.cs`, with these three deliberate differences:
+
+1. The annotation read/write uses `RelationalAnnotationNames.KeyOverrides`, not `RelationalOverrides`.
+2. The constructor's model access goes through the key: `((IConventionModel)key.DeclaringEntityType.Model).Builder`.
+3. `IsReadOnly` delegates to the key: `((Annotatable)Key).IsReadOnly`.
+
+For reference, the two static entry points come out as:
+
+```csharp
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public static IReadOnlyRelationalKeyOverrides? Find(IReadOnlyKey key, in StoreObjectIdentifier storeObject)
+        => ((IReadOnlyStoreObjectDictionary<IReadOnlyRelationalKeyOverrides>?)key[RelationalAnnotationNames.KeyOverrides])
+            ?.Find(storeObject);
+
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public static RelationalKeyOverrides GetOrCreate(
+        IMutableKey key,
+        in StoreObjectIdentifier storeObject,
+        ConfigurationSource configurationSource)
+    {
+        var keyOverrides = (StoreObjectDictionary<RelationalKeyOverrides>?)key[RelationalAnnotationNames.KeyOverrides];
+        if (keyOverrides == null)
+        {
+            keyOverrides = new StoreObjectDictionary<RelationalKeyOverrides>();
+            key[RelationalAnnotationNames.KeyOverrides] = keyOverrides;
+        }
+
+        var overrides = keyOverrides.Find(storeObject);
+        if (overrides == null)
+        {
+            overrides = new RelationalKeyOverrides(key, storeObject, configurationSource);
+            keyOverrides.Add(storeObject, overrides);
+        }
+        else
+        {
+            overrides.UpdateConfigurationSource(configurationSource);
+        }
+
+        return overrides;
+    }
+```
+
+- [ ] **Step 6: Create the builder pair**
+
+Apply the substitution table to `IConventionRelationalPropertyOverridesBuilder.cs` and `InternalRelationalPropertyOverridesBuilder.cs`. The only method is `HasColumnName` → `HasName`.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs
+git commit -m "Add the per-store-object key constraint name override family
+
+Task B1. Patterned on RelationalPropertyOverrides with single-store-object
+identity, typed overrides, and configuration sources."
+```
+
+---
+
+### Task B2: Key name resolution seam
+
+Spike 2 finding: the two `(string?)key[RelationalAnnotationNames.Name] ?? defaultName` expressions in `RelationalKeyExtensions.GetName(key, storeObject, logger)` are the **entire** global-name fallback — a single seam in two branches. This task turns the spike's raw-dictionary lookup into a real one and pins the precedence.
+
+Precedence, from most to least specific: **per-store-object override → global `Relational:Name` annotation → default generated name.** An override whose name is explicitly `null` suppresses down to the default name rather than falling through to the global annotation, because "I explicitly do not want the global rewritten name here" is exactly the NamingConventions #396 use case.
+
+**Files:**
+- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`
+
+**Interfaces:**
+- Consumes: `RelationalKeyOverrides.Find` from Task B1.
+- Produces: no new signature — `GetName(key, storeObject, logger)` gains override awareness.
+
+- [ ] **Step 1: Write the failing test**
+
+```csharp
+[ConditionalFact]
+public void Key_name_override_beats_the_global_rewritten_name_per_table()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+    });
+
+    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+    var customers = StoreObjectIdentifier.Table("Customers");
+    var details = StoreObjectIdentifier.Table("CustomerDetails");
+
+    // The NamingConventions #396 collision shape: one global rewritten name for two tables.
+    key.SetName("pk_global_rewrite");
+    Assert.Equal("pk_global_rewrite", key.GetName(customers));
+    Assert.Equal("pk_global_rewrite", key.GetName(details));
+
+    RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit)
+        .SetName("pk_customers", ConfigurationSource.Explicit);
+    RelationalKeyOverrides.GetOrCreate(key, details, ConfigurationSource.Explicit)
+        .SetName("pk_customer_details", ConfigurationSource.Explicit);
+
+    Assert.Equal("pk_customers", key.GetName(customers));
+    Assert.Equal("pk_customer_details", key.GetName(details));
+}
+
+[ConditionalFact]
+public void Explicit_null_key_name_override_falls_back_to_the_default_name()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+    });
+
+    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+    var details = StoreObjectIdentifier.Table("CustomerDetails");
+
+    key.SetName("pk_global_rewrite");
+    RelationalKeyOverrides.GetOrCreate(key, details, ConfigurationSource.Explicit)
+        .SetName(null, ConfigurationSource.Explicit);
+
+    Assert.Equal("PK_CustomerDetails", key.GetName(details));
+}
+
+[ConditionalFact]
+public void Per_table_key_names_flow_into_the_relational_model()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+    });
+
+    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+    RelationalKeyOverrides.GetOrCreate(key, StoreObjectIdentifier.Table("Customers"), ConfigurationSource.Explicit)
+        .SetName("pk_customers", ConfigurationSource.Explicit);
+    RelationalKeyOverrides.GetOrCreate(key, StoreObjectIdentifier.Table("CustomerDetails"), ConfigurationSource.Explicit)
+        .SetName("pk_customer_details", ConfigurationSource.Explicit);
+
+    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
+
+    Assert.Equal(
+        "pk_customers",
+        relationalModel.Tables.Single(t => t.Name == "Customers").UniqueConstraints.Single().Name);
+    Assert.Equal(
+        "pk_customer_details",
+        relationalModel.Tables.Single(t => t.Name == "CustomerDetails").UniqueConstraints.Single().Name);
+}
+```
+
+The third test is Spike 2's finding 2 turned into a regression test: `RelationalModel` builds constraint names by calling these same resolvers, so correct resolution propagates to the differ for free.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: FAIL — both tables still resolve `pk_global_rewrite`.
+
+- [ ] **Step 3: Insert the override lookup**
+
+In `src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs`, in `GetName(key, storeObject, logger)`, replace **both** `(string?)key[RelationalAnnotationNames.Name] ?? defaultName` expressions with a call to a shared local, and add the helper:
+
+```csharp
+        if (fragment != null)
+        {
+            return defaultName != null
+                ? ResolveName(key, storeObject, defaultName)
+                : null;
+        }
+
+        foreach (var containingType in declaringType.GetDerivedTypesInclusive())
+        {
+            if (StoreObjectIdentifier.Create(containingType, storeObject.StoreObjectType) == storeObject)
+            {
+                return defaultName != null
+                    ? ResolveName(key, storeObject, defaultName)
+                    : null;
+            }
+        }
+
+        return null;
+
+        static string? ResolveName(IReadOnlyKey key, in StoreObjectIdentifier storeObject, string defaultName)
+        {
+            // Per-store-object override wins over the global name, which wins over the default. An
+            // override set explicitly to null suppresses the global name down to the default, which is
+            // what lets a naming convention opt one table out of a global rewrite.
+            var overrides = RelationalKeyOverrides.Find(key, storeObject);
+            if (overrides is { IsNameOverridden: true })
+            {
+                return overrides.Name ?? defaultName;
+            }
+
+            return (string?)key[RelationalAnnotationNames.Name] ?? defaultName;
+        }
+```
+
+A local function cannot take an `in` parameter alongside a closure over `storeObject`, so pass `storeObject` explicitly as shown rather than capturing it.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs \
+        test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs
+git commit -m "Resolve key constraint names through per-store-object overrides
+
+Task B2. Override beats the global name beats the default; an explicitly null
+override suppresses a global rewrite for one table."
+```
+
+---
+### Task B3: FK override metadata family with composite identity
+
+The dimensionality difference. Spike 2 finding 1: the entity-splitting linking constraint on `UserLockout` reports exactly **one** mapped model FK (`SpikeUser.[Id] → SpikeUser`, `unique=true`), and that same FK object serves *every* fragment's linking constraint. A single-store-object override cannot name them apart. The override key is therefore the pair `(dependentStoreObject, principalStoreObject)`.
+
+**Files:**
+- Create: `src/EFCore.Relational/Metadata/StoreObjectPair.cs` and `StoreObjectPairDictionary.cs`, `IReadOnlyStoreObjectPairDictionary.cs`
+- Create: the `*RelationalForeignKeyOverrides*` interface quartet, implementation, and builder pair
+- Modify: `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs` *(new)*
+
+**Interfaces:**
+- Consumes: the shape established in Task B1.
+- Produces:
+  - `readonly record struct StoreObjectPair(StoreObjectIdentifier DependentStoreObject, StoreObjectIdentifier PrincipalStoreObject)`
+  - `StoreObjectPairDictionary<T>` with `Find(in StoreObjectPair)`, `GetValues()`, `Add`, `Remove`
+  - `RelationalAnnotationNames.ForeignKeyOverrides` (`"Relational:ForeignKeyOverrides"`)
+  - `static IReadOnlyRelationalForeignKeyOverrides? RelationalForeignKeyOverrides.Find(IReadOnlyForeignKey foreignKey, in StoreObjectPair storeObjects)`
+  - `static RelationalForeignKeyOverrides RelationalForeignKeyOverrides.GetOrCreate(IMutableForeignKey foreignKey, in StoreObjectPair storeObjects, ConfigurationSource configurationSource)`
+  - plus `Get`, `Remove`, and the same instance members as Task B1 (`Name`, `SetName`, `IsNameOverridden`, `GetNameConfigurationSource`)
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`:
+
+```csharp
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Microsoft.EntityFrameworkCore.Metadata;
+
+public class RelationalForeignKeyOverridesTest
+{
+    [ConditionalFact]
+    public void Two_fragments_of_one_entity_share_a_single_model_foreign_key()
+    {
+        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<User>(b =>
+        {
+            b.ToTable("Users");
+            b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
+            b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
+        });
+
+        var model = modelBuilder.FinalizeModel();
+        var entityType = model.FindEntityType(typeof(User))!;
+
+        // Spike 2 finding 1: one self-referential FK serves every fragment's linking constraint,
+        // which is why override identity must be the (dependent, principal) pair.
+        var linkingForeignKeys = entityType.GetForeignKeys()
+            .Where(fk => fk.PrincipalEntityType == entityType)
+            .ToList();
+        Assert.Single(linkingForeignKeys);
+    }
+
+    [ConditionalFact]
+    public void Foreign_key_overrides_are_keyed_by_the_dependent_principal_pair()
+    {
+        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<User>(b =>
+        {
+            b.ToTable("Users");
+            b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
+            b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
+        });
+
+        var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
+        var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
+            .Single(fk => fk.PrincipalEntityType == entityType);
+
+        var users = StoreObjectIdentifier.Table("Users");
+        var lockoutPair = new StoreObjectPair(StoreObjectIdentifier.Table("UserLockout"), users);
+        var profilePair = new StoreObjectPair(StoreObjectIdentifier.Table("UserProfile"), users);
+
+        RelationalForeignKeyOverrides.GetOrCreate(foreignKey, lockoutPair, ConfigurationSource.Explicit)
+            .SetName("fk_user_lockout", ConfigurationSource.Explicit);
+        RelationalForeignKeyOverrides.GetOrCreate(foreignKey, profilePair, ConfigurationSource.Explicit)
+            .SetName("fk_user_profile", ConfigurationSource.Explicit);
+
+        // One FK object, two distinctly named constraints — impossible with single-store-object identity.
+        Assert.Equal("fk_user_lockout", RelationalForeignKeyOverrides.Find(foreignKey, lockoutPair)!.Name);
+        Assert.Equal("fk_user_profile", RelationalForeignKeyOverrides.Find(foreignKey, profilePair)!.Name);
+    }
+
+    [ConditionalFact]
+    public void Store_object_pair_equality_is_order_sensitive()
+    {
+        var a = StoreObjectIdentifier.Table("A");
+        var b = StoreObjectIdentifier.Table("B");
+
+        Assert.Equal(new StoreObjectPair(a, b), new StoreObjectPair(a, b));
+        Assert.NotEqual(new StoreObjectPair(a, b), new StoreObjectPair(b, a));
+        Assert.NotEqual(new StoreObjectPair(a, b).GetHashCode(), new StoreObjectPair(b, a).GetHashCode());
+    }
+
+    private class User
+    {
+        public int Id { get; set; }
+        public string PasswordHash { get; set; } = null!;
+        public string DisplayName { get; set; } = null!;
+    }
+}
+```
+
+The hash-code assertion could in principle collide by chance; if it proves flaky, drop that one line and keep the two equality assertions.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: compile error — `StoreObjectPair` and `RelationalForeignKeyOverrides` do not exist. The first test should compile and pass on its own once those types exist; it documents the spike finding and needs no new production code.
+
+- [ ] **Step 3: Create the pair key**
+
+Create `src/EFCore.Relational/Metadata/StoreObjectPair.cs`:
+
+```csharp
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Microsoft.EntityFrameworkCore.Metadata;
+
+/// <summary>
+///     Identifies a foreign key constraint by the pair of store objects it connects.
+/// </summary>
+/// <remarks>
+///     A foreign key constraint name is a relationship between two tables, not a property of one:
+///     a single model foreign key can materialize as several constraints, one per dependent table.
+/// </remarks>
+/// <param name="DependentStoreObject">The store object holding the constraint.</param>
+/// <param name="PrincipalStoreObject">The store object the constraint references.</param>
+public readonly record struct StoreObjectPair(
+    StoreObjectIdentifier DependentStoreObject,
+    StoreObjectIdentifier PrincipalStoreObject)
+{
+    /// <summary>
+    ///     Returns a readable representation of the pair.
+    /// </summary>
+    /// <returns>The display string.</returns>
+    public override string ToString()
+        => $"{DependentStoreObject.DisplayName()} -> {PrincipalStoreObject.DisplayName()}";
+}
+```
+
+A `record struct` gives value equality and a correct order-sensitive hash code for free.
+
+- [ ] **Step 4: Create the pair dictionary**
+
+Create `src/EFCore.Relational/Metadata/StoreObjectPairDictionary.cs` and `IReadOnlyStoreObjectPairDictionary.cs` by applying `StoreObjectIdentifier` → `StoreObjectPair` to `StoreObjectDictionary.cs` and `IReadOnlyStoreObjectDictionary.cs`. The one substantive change is `GetValues()`, whose ordering must stay deterministic for snapshot generation:
+
+```csharp
+    /// <inheritdoc />
+    public virtual IEnumerable<T> GetValues()
+        => _dictionary
+            .OrderBy(pair => pair.Key.DependentStoreObject.Name, StringComparer.Ordinal)
+            .ThenBy(pair => pair.Key.PrincipalStoreObject.Name, StringComparer.Ordinal)
+            .Select(pair => pair.Value);
+```
+
+- [ ] **Step 5: Add the annotation name**
+
+In `RelationalAnnotationNames.cs`, next to the `KeyOverrides` constant from Task B1:
+
+```csharp
+    /// <summary>
+    ///     The name for per-store-object-pair foreign key constraint name overrides.
+    /// </summary>
+    public const string ForeignKeyOverrides = Prefix + "ForeignKeyOverrides";
+```
+
+and add it to the `AllNames` array.
+
+- [ ] **Step 6: Create the FK override family**
+
+Apply the Task B1 substitution table to the *key* override files you just wrote, with these differences:
+
+| In `RelationalKeyOverrides` | In `RelationalForeignKeyOverrides` |
+|---|---|
+| `IReadOnlyKey` / `IMutableKey` / `IConventionKey` / `IKey` | `IReadOnlyForeignKey` / `IMutableForeignKey` / `IConventionForeignKey` / `IForeignKey` |
+| `StoreObjectIdentifier StoreObject` | `StoreObjectPair StoreObjects` |
+| `StoreObjectDictionary<RelationalKeyOverrides>` | `StoreObjectPairDictionary<RelationalForeignKeyOverrides>` |
+| `RelationalAnnotationNames.KeyOverrides` | `RelationalAnnotationNames.ForeignKeyOverrides` |
+| `key.DeclaringEntityType.Model` | `foreignKey.DeclaringEntityType.Model` |
+
+Everything else — configuration sources, `IsInModel`, `SetRemovedFromModel`, `DebugView`, `ToString` — carries over unchanged.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs
+git commit -m "Add the per-store-object-pair foreign key name override family
+
+Task B3. Composite (dependent, principal) identity, because one model FK
+serves every entity-splitting fragment's linking constraint."
+```
+
+---
+
+### Task B4: FK constraint name resolution seam
+
+**Files:**
+- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`
+
+**Interfaces:**
+- Consumes: `RelationalForeignKeyOverrides.Find` from Task B3.
+- Produces: no new signature — `GetConstraintName(fk, storeObject, principalStoreObject, logger)` gains override awareness.
+
+- [ ] **Step 1: Write the failing test**
+
+```csharp
+[ConditionalFact]
+public void Foreign_key_name_overrides_resolve_per_pair_and_reach_the_relational_model()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<User>(b =>
+    {
+        b.ToTable("Users");
+        b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
+        b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
+    });
+
+    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
+    var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
+        .Single(fk => fk.PrincipalEntityType == entityType);
+
+    var users = StoreObjectIdentifier.Table("Users");
+    var lockout = StoreObjectIdentifier.Table("UserLockout");
+    var profile = StoreObjectIdentifier.Table("UserProfile");
+
+    RelationalForeignKeyOverrides.GetOrCreate(
+        foreignKey, new StoreObjectPair(lockout, users), ConfigurationSource.Explicit)
+        .SetName("fk_user_lockout", ConfigurationSource.Explicit);
+    RelationalForeignKeyOverrides.GetOrCreate(
+        foreignKey, new StoreObjectPair(profile, users), ConfigurationSource.Explicit)
+        .SetName("fk_user_profile", ConfigurationSource.Explicit);
+
+    Assert.Equal("fk_user_lockout", foreignKey.GetConstraintName(lockout, users));
+    Assert.Equal("fk_user_profile", foreignKey.GetConstraintName(profile, users));
+
+    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
+    Assert.Equal(
+        "fk_user_lockout",
+        relationalModel.Tables.Single(t => t.Name == "UserLockout").ForeignKeyConstraints.Single().Name);
+    Assert.Equal(
+        "fk_user_profile",
+        relationalModel.Tables.Single(t => t.Name == "UserProfile").ForeignKeyConstraints.Single().Name);
+}
+
+[ConditionalFact]
+public void Foreign_key_override_does_not_apply_where_the_constraint_does_not_materialize()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<User>(b =>
+    {
+        b.ToTable("Users");
+        b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
+    });
+
+    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
+    var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
+        .Single(fk => fk.PrincipalEntityType == entityType);
+
+    var users = StoreObjectIdentifier.Table("Users");
+    var absent = StoreObjectIdentifier.Table("NotAMappedTable");
+
+    RelationalForeignKeyOverrides.GetOrCreate(
+        foreignKey, new StoreObjectPair(absent, users), ConfigurationSource.Explicit)
+        .SetName("fk_nowhere", ConfigurationSource.Explicit);
+
+    // The override is gated on the constraint actually materializing (defaultName != null).
+    Assert.Null(foreignKey.GetConstraintName(absent, users));
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: FAIL — both pairs resolve the same default `FK_...` name.
+
+- [ ] **Step 3: Insert the override lookup**
+
+In `src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs`, in `GetConstraintName(foreignKey, storeObject, principalStoreObject, logger)`, between the `defaultName` computation and the global annotation read:
+
+```csharp
+        var defaultName = foreignKey.GetDefaultName(storeObject, principalStoreObject, logger);
+
+        // Gated on defaultName: an override only applies where the constraint actually materializes,
+        // which keeps override storage from inventing constraints on unmapped store objects.
+        if (defaultName != null
+            && RelationalForeignKeyOverrides.Find(foreignKey, new StoreObjectPair(storeObject, principalStoreObject))
+                is { IsNameOverridden: true } overrides)
+        {
+            return overrides.Name ?? defaultName;
+        }
+
+        var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
+        return annotation != null && defaultName != null
+            ? (string?)annotation.Value
+            : defaultName;
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS. Spike 2 finding 2 says `RelationalModel` builds `ForeignKeyConstraint` names through this same function, so the relational-model half of the first test should pass with no further changes — if it does not, that assumption has broken and needs investigating before continuing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs \
+        test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs
+git commit -m "Resolve FK constraint names through per-pair overrides
+
+Task B4. Override applies only where the constraint materializes, so storage
+cannot invent constraints on unmapped store objects."
+```
+
+---
+### Task B5: Attach, merge, and survival through model rebuilding
+
+Spec §4's checklist item "`Attach`/`Detach`/`MergeInto` behavior on entity-type re-parenting". Keys and foreign keys are routinely detached and re-created during model building (`InternalEntityTypeBuilder.DetachKeys`, `InternalForeignKeyBuilder`, `InternalTypeBaseBuilder`). Annotation *values* survive that via `MergeAnnotationsFrom`, but the `RelationalKeyOverrides` objects inside them would keep a stale `Key` reference and a dead builder — which is precisely what `RelationalPropertyOverrides.Attach`/`MergeInto` exists to fix for properties.
+
+**Files:**
+- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`, `RelationalForeignKeyOverrides.cs`
+- Create: `src/EFCore.Relational/Metadata/Conventions/KeyOverridesConvention.cs`, `ForeignKeyOverridesConvention.cs`
+- Modify: `src/EFCore.Relational/Metadata/Conventions/Infrastructure/RelationalConventionSetBuilder.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`, `RelationalForeignKeyOverridesTest.cs`
+
+**Interfaces:**
+- Consumes: Tasks B1 and B3.
+- Produces:
+  - `static void RelationalKeyOverrides.Attach(IConventionKey key, IConventionRelationalKeyOverrides detachedOverrides)`
+  - `static RelationalKeyOverrides RelationalKeyOverrides.MergeInto(IConventionRelationalKeyOverrides detached, IConventionRelationalKeyOverrides existing)`
+  - the two FK equivalents, taking `IConventionForeignKey`
+  - `KeyOverridesConvention : IKeyAddedConvention`, `ForeignKeyOverridesConvention : IForeignKeyAddedConvention`
+
+- [ ] **Step 1: Write the failing test**
+
+```csharp
+[ConditionalFact]
+public void Key_overrides_survive_key_redefinition()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+    });
+
+    var entityType = modelBuilder.Model.FindEntityType(typeof(Customer))!;
+    var key = (IMutableKey)entityType.FindPrimaryKey()!;
+    var customers = StoreObjectIdentifier.Table("Customers");
+
+    RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit)
+        .SetName("pk_customers", ConfigurationSource.Explicit);
+
+    // Redefining the key detaches and re-creates it.
+    modelBuilder.Entity<Customer>().HasKey(c => c.Id);
+
+    var newKey = modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+    Assert.Equal("pk_customers", newKey.GetName(customers));
+}
+```
+
+Write the FK analogue in `RelationalForeignKeyOverridesTest.cs`, redefining the relationship via `HasOne(...).WithMany(...)` and asserting the pair-keyed override still resolves.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: FAIL — the override is lost, or resolves through a stale key.
+
+- [ ] **Step 3: Add `Attach` and `MergeInto`**
+
+To `RelationalKeyOverrides`, mirroring `RelationalPropertyOverrides.cs:107–135`:
+
+```csharp
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public static void Attach(IConventionKey key, IConventionRelationalKeyOverrides detachedOverrides)
+    {
+        var newOverrides = GetOrCreate(
+            (IMutableKey)key,
+            detachedOverrides.StoreObject,
+            detachedOverrides.GetConfigurationSource());
+
+        MergeInto(detachedOverrides, newOverrides);
+    }
+
+    /// <summary>
+    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
+    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
+    ///     any release. You should only use it directly in your code with extreme caution and knowing that
+    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
+    /// </summary>
+    public static RelationalKeyOverrides MergeInto(
+        IConventionRelationalKeyOverrides detachedOverrides,
+        IConventionRelationalKeyOverrides existingOverrides)
+    {
+        var nameConfigurationSource = detachedOverrides.GetNameConfigurationSource();
+        if (nameConfigurationSource != null)
+        {
+            existingOverrides = ((InternalRelationalKeyOverridesBuilder)existingOverrides.Builder)
+                .HasName(detachedOverrides.Name, nameConfigurationSource.Value)
+                !.Metadata;
+        }
+
+        return ((InternalRelationalKeyOverridesBuilder)existingOverrides.Builder)
+            .MergeAnnotationsFrom((RelationalKeyOverrides)detachedOverrides)
+            .Metadata;
+    }
+```
+
+Write the FK versions the same way, taking `IConventionForeignKey` and `detachedOverrides.StoreObjects`.
+
+- [ ] **Step 4: Add the two conventions**
+
+Create `src/EFCore.Relational/Metadata/Conventions/KeyOverridesConvention.cs` following `PropertyOverridesConvention.cs` exactly — same constructor, same `Dependencies`/`RelationalDependencies` properties, same "collect stale, remove, re-attach" body — implementing `IKeyAddedConvention` instead of `IPropertyAddedConvention`:
+
+```csharp
+    /// <inheritdoc />
+    public virtual void ProcessKeyAdded(
+        IConventionKeyBuilder keyBuilder,
+        IConventionContext<IConventionKeyBuilder> context)
+    {
+        var key = keyBuilder.Metadata;
+
+        List<IConventionRelationalKeyOverrides>? overridesToReattach = null;
+        foreach (var overrides in key.GetOverrides())
+        {
+            if (overrides.Key == key)
+            {
+                continue;
+            }
+
+            overridesToReattach ??= [];
+            overridesToReattach.Add(overrides);
+        }
+
+        if (overridesToReattach == null)
+        {
+            return;
+        }
+
+        foreach (var overrides in overridesToReattach)
+        {
+            var removedOverrides = key.RemoveOverrides(overrides.StoreObject);
+            if (removedOverrides != null)
+            {
+                RelationalKeyOverrides.Attach(key, removedOverrides);
+            }
+        }
+    }
+```
+
+This needs `GetOverrides()` / `RemoveOverrides(storeObject)` convenience extensions on `IConventionKey`; add them to `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs` in Task B6 alongside the rest of the public surface, or add them as internal helpers here and promote them there.
+
+Note the difference from `PropertyOverridesConvention`: that convention early-returns for non-shared-CLR-type declaring types, because property overrides only go stale under shared-type entity types. Keys and FKs go stale under any detach/re-create, so **there is no early return here**.
+
+Write `ForeignKeyOverridesConvention` the same way over `IForeignKeyAddedConvention` and `StoreObjects`.
+
+- [ ] **Step 5: Register the conventions**
+
+In `src/EFCore.Relational/Metadata/Conventions/Infrastructure/RelationalConventionSetBuilder.cs`, next to `:68`:
+
+```csharp
+        conventionSet.Add(new PropertyOverridesConvention(Dependencies, RelationalDependencies));
+        conventionSet.Add(new KeyOverridesConvention(Dependencies, RelationalDependencies));
+        conventionSet.Add(new ForeignKeyOverridesConvention(Dependencies, RelationalDependencies));
+```
+
+`ConventionSetTest`-style tests assert the full convention list in some providers; if one fails, add the two new conventions to its expected list.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/
+git commit -m "Re-attach key and FK overrides when the key or FK is re-created
+
+Task B5. Overrides now survive key redefinition and relationship
+reconfiguration during model building."
+```
+
+---
+
+### Task B6: Public and convention configuration API
+
+Spec §4, "Convention seam": `key.Builder.HasName(name, storeObject)` and the FK pair equivalent are exactly what EFCore.NamingConventions needs, plus public fluent equivalents for hand-written models.
+
+**Files:**
+- Modify: `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs`, `RelationalForeignKeyExtensions.cs`
+- Modify: `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`, `RelationalForeignKeyBuilderExtensions.cs`
+- Modify: `src/EFCore.Relational/Metadata/Builders/IConventionKeyBuilder.cs` (+ its internal implementation), and the FK equivalent
+- Test: `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs`
+
+**Interfaces:**
+- Consumes: Tasks B1–B5.
+- Produces:
+  - `static void RelationalKeyExtensions.SetName(this IMutableKey key, string? name, in StoreObjectIdentifier storeObject)`
+  - `static string? RelationalKeyExtensions.SetName(this IConventionKey key, string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
+  - `static ConfigurationSource? RelationalKeyExtensions.GetNameConfigurationSource(this IConventionKey key, in StoreObjectIdentifier storeObject)`
+  - `static IEnumerable<IReadOnlyRelationalKeyOverrides> RelationalKeyExtensions.GetOverrides(this IReadOnlyKey key)` and `IMutableRelationalKeyOverrides? RemoveOverrides(this IMutableKey key, in StoreObjectIdentifier storeObject)`
+  - `static KeyBuilder RelationalKeyBuilderExtensions.HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)` and the generic `KeyBuilder<TEntity>` overload
+  - `IConventionKeyBuilder? IConventionKeyBuilder.HasName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)` and `bool CanSetName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
+  - the FK equivalents, all taking both store objects — named explicitly because later tasks call them:
+    - `static void RelationalForeignKeyExtensions.SetConstraintName(this IMutableForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
+    - `static string? RelationalForeignKeyExtensions.SetConstraintName(this IConventionForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)`
+    - `static ConfigurationSource? RelationalForeignKeyExtensions.GetConstraintNameConfigurationSource(this IConventionForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
+    - `static IEnumerable<IReadOnlyRelationalForeignKeyOverrides> RelationalForeignKeyExtensions.GetOverrides(this IReadOnlyForeignKey foreignKey)` and `IMutableRelationalForeignKeyOverrides? RemoveOverrides(this IMutableForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
+    - `static ReferenceCollectionBuilder RelationalForeignKeyBuilderExtensions.HasConstraintName(this ReferenceCollectionBuilder builder, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`, plus the generic and `ReferenceReferenceBuilder` overloads that the existing `HasConstraintName(string?)` already has — mirror that method's full overload set exactly
+    - `IConventionForeignKeyBuilder? IConventionForeignKeyBuilder.HasConstraintName(string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)` and the matching `CanSetConstraintName`
+
+Each FK extension constructs the `StoreObjectPair` internally, so callers never handle the pair type unless they want to.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs`:
+
+```csharp
+[ConditionalFact]
+public virtual void Can_configure_per_table_key_and_foreign_key_constraint_names()
+{
+    var modelBuilder = CreateModelBuilder();
+
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+        b.HasKey(c => c.Id)
+            .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
+            .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
+    });
+
+    var model = modelBuilder.FinalizeModel();
+    var key = model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+
+    Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers")));
+    Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails")));
+}
+```
+
+Chaining two `HasName` calls proves the fluent overload returns the builder and that two overrides coexist.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: compile error — `HasName` has no store-object overload.
+
+- [ ] **Step 3: Add the metadata extensions**
+
+To `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs`, next to the existing `SetName` members:
+
+```csharp
+    /// <summary>
+    ///     Sets the key constraint name for this key for a particular table.
+    /// </summary>
+    /// <param name="key">The key.</param>
+    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the containing store object.</param>
+    public static void SetName(this IMutableKey key, string? name, in StoreObjectIdentifier storeObject)
+        => RelationalKeyOverrides
+            .GetOrCreate(key, storeObject, ConfigurationSource.Explicit)
+            .SetName(Check.NullButNotEmpty(name), ConfigurationSource.Explicit);
+
+    /// <summary>
+    ///     Sets the key constraint name for this key for a particular table.
+    /// </summary>
+    /// <param name="key">The key.</param>
+    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the containing store object.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns>The configured name.</returns>
+    public static string? SetName(
+        this IConventionKey key,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        bool fromDataAnnotation = false)
+    {
+        var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
+
+        return RelationalKeyOverrides
+            .GetOrCreate((IMutableKey)key, storeObject, configurationSource)
+            .SetName(Check.NullButNotEmpty(name), configurationSource);
+    }
+
+    /// <summary>
+    ///     Gets the <see cref="ConfigurationSource" /> for the key constraint name for a particular table.
+    /// </summary>
+    /// <param name="key">The key.</param>
+    /// <param name="storeObject">The identifier of the containing store object.</param>
+    /// <returns>The <see cref="ConfigurationSource" /> for the constraint name.</returns>
+    public static ConfigurationSource? GetNameConfigurationSource(
+        this IConventionKey key,
+        in StoreObjectIdentifier storeObject)
+        => (RelationalKeyOverrides.Find(key, storeObject) as IConventionRelationalKeyOverrides)
+            ?.GetNameConfigurationSource();
+
+    /// <summary>
+    ///     Returns all per-store-object constraint name overrides configured for this key.
+    /// </summary>
+    /// <param name="key">The key.</param>
+    /// <returns>The overrides.</returns>
+    public static IEnumerable<IReadOnlyRelationalKeyOverrides> GetOverrides(this IReadOnlyKey key)
+        => RelationalKeyOverrides.Get(key) ?? [];
+
+    /// <summary>
+    ///     Removes the per-store-object constraint name override for the given store object.
+    /// </summary>
+    /// <param name="key">The key.</param>
+    /// <param name="storeObject">The identifier of the containing store object.</param>
+    /// <returns>The removed override, or <see langword="null" /> if none was configured.</returns>
+    public static IMutableRelationalKeyOverrides? RemoveOverrides(
+        this IMutableKey key,
+        in StoreObjectIdentifier storeObject)
+        => RelationalKeyOverrides.Remove(key, storeObject);
+```
+
+Add the FK equivalents listed in this task's **Interfaces** block to `RelationalForeignKeyExtensions.cs`, each constructing the `StoreObjectPair` from its two store-object parameters.
+
+- [ ] **Step 4: Add the fluent builder overloads**
+
+To `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`:
+
+```csharp
+    /// <summary>
+    ///     Configures the name of the key constraint in the database for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to further configure the key.</returns>
+    public static KeyBuilder HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)
+    {
+        Check.NullButNotEmpty(name);
+
+        keyBuilder.Metadata.SetName(name, storeObject);
+
+        return keyBuilder;
+    }
+
+    /// <summary>
+    ///     Configures the name of the key constraint in the database for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <typeparam name="TEntity">The entity type being configured.</typeparam>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to further configure the key.</returns>
+    public static KeyBuilder<TEntity> HasName<TEntity>(
+        this KeyBuilder<TEntity> keyBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject)
+        => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name, storeObject);
+```
+
+Add the convention-builder members to `IConventionKeyBuilder` and its implementation, following the existing `HasName(string?, bool)` pair on that interface. `CanSetName(name, storeObject, fromDataAnnotation)` must compare against `GetNameConfigurationSource(storeObject)` — this is the seam NamingConventions calls, so it has to respect explicit user configuration.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/EFCore.Relational/
+git commit -m "Add public and convention APIs for per-store-object constraint names
+
+Task B6. HasName(name, storeObject) on the key builder and the pair-taking FK
+equivalent, plus the convention-builder seam naming conventions consume."
+```
+
+---
+### Task B7: Runtime model conversion
+
+Spec §4 checklist, "runtime-model (compiled model) generation". `RelationalRuntimeModelConvention` converts the property-overrides annotation into `RuntimeRelationalPropertyOverrides` (`:404–432`); both new families need the same treatment or compiled models resolve the wrong constraint names.
+
+**Files:**
+- Create: `src/EFCore.Relational/Metadata/RuntimeRelationalKeyOverrides.cs`, `RuntimeRelationalForeignKeyOverrides.cs`
+- Modify: `src/EFCore.Relational/Metadata/Conventions/RelationalRuntimeModelConvention.cs`
+- Test: `test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs`
+
+**Interfaces:**
+- Consumes: Tasks B1 and B3.
+- Produces:
+  - `RuntimeRelationalKeyOverrides(IKey key, in StoreObjectIdentifier storeObject, bool isNameOverridden, string? name)`
+  - `RuntimeRelationalForeignKeyOverrides(IForeignKey foreignKey, in StoreObjectPair storeObjects, bool isNameOverridden, string? name)`
+  - `protected virtual void RelationalRuntimeModelConvention.ProcessKeyOverridesAnnotations(...)` and `ProcessForeignKeyOverridesAnnotations(...)`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs`, in the style of that file's existing tests:
+
+```csharp
+[ConditionalFact]
+public virtual Task Per_store_object_constraint_names_survive_the_compiled_model()
+    => Test(
+        modelBuilder => modelBuilder.Entity<Customer>(b =>
+        {
+            b.ToTable("Customers");
+            b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+            b.HasKey(c => c.Id)
+                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
+                .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
+        }),
+        model =>
+        {
+            var key = model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+            Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers")));
+            Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails")));
+        });
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: FAIL — the compiled model resolves the default names because the override annotation was dropped or left in its design-time form.
+
+- [ ] **Step 3: Create the runtime types**
+
+Copy `src/EFCore.Relational/Metadata/RuntimeRelationalPropertyOverrides.cs` twice, applying the Task B1 and Task B3 substitution tables. These are immutable read-side types — constructor-assigned properties, no configuration sources.
+
+- [ ] **Step 4: Add the conversions**
+
+In `RelationalRuntimeModelConvention`, alongside the property-overrides block at `:404`, add equivalents in `ProcessKeyAnnotations` and `ProcessForeignKeyAnnotations`:
+
+```csharp
+            if (annotations.TryGetValue(RelationalAnnotationNames.KeyOverrides, out var keyOverrides)
+                && keyOverrides != null)
+            {
+                var overridesByStoreObject = (IReadOnlyStoreObjectDictionary<IRelationalKeyOverrides>)keyOverrides;
+                var runtimeOverridesByStoreObject = new StoreObjectDictionary<RuntimeRelationalKeyOverrides>();
+                foreach (var overrides in overridesByStoreObject.GetValues())
+                {
+                    var runtimeOverrides = Create(overrides, runtimeKey);
+                    runtimeOverridesByStoreObject.Add(overrides.StoreObject, runtimeOverrides);
+
+                    CreateAnnotations(
+                        overrides, runtimeOverrides,
+                        static (convention, annotations, source, target, runtime)
+                            => convention.ProcessKeyOverridesAnnotations(annotations, source, target, runtime));
+                }
+
+                annotations[RelationalAnnotationNames.KeyOverrides] = runtimeOverridesByStoreObject;
+            }
+
+    private static RuntimeRelationalKeyOverrides Create(IRelationalKeyOverrides overrides, RuntimeKey runtimeKey)
+        => new(runtimeKey, overrides.StoreObject, overrides.IsNameOverridden, overrides.Name);
+```
+
+Write the FK block the same way over `StoreObjectPairDictionary<RuntimeRelationalForeignKeyOverrides>` and `overrides.StoreObjects`.
+
+If `ProcessKeyAnnotations` / `ProcessForeignKeyAnnotations` do not exist on this convention, add them following the shape of `ProcessPropertyAnnotations` — grep the file for `ProcessPropertyAnnotations` and mirror its signature and dispatch.
+
+- [ ] **Step 5: Handle the CSharp runtime annotation code generator**
+
+`RelationalCSharpRuntimeAnnotationCodeGenerator` emits code for `RelationalOverrides`; grep it for `RelationalOverrides` and add the two new annotation names to the same handling, or compiled-model *code generation* (as opposed to the in-memory runtime model) will emit an unusable annotation literal. The test in Step 1 exercises the code-generation path if `Test(...)` compiles the generated model — check what the base `Test` helper does and, if it only builds in memory, add a second test that goes through code generation.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/EFCore.Relational/Metadata/
+git commit -m "Convert key and FK overrides into the runtime model
+
+Task B7. Compiled models resolve per-store-object constraint names."
+```
+
+---
+
+### Task B8: Snapshot generation and debug output
+
+Spec §4 checklist, "snapshot generation" and "debug/`ToDebugString` surfacing". `CSharpSnapshotGenerator.GeneratePropertyOverrides` (`:1600–1646`) emits property overrides as store-object-scoped fluent calls; keys and FKs need equivalents, and the fluent surface from Task B6 is what they emit.
+
+Without this, `dotnet ef migrations add` drops the overrides from the snapshot and the next migration regenerates every constraint with its default name.
+
+**Files:**
+- Modify: `src/EFCore.Design/Migrations/Design/CSharpSnapshotGenerator.cs`
+- Modify: `src/EFCore.Relational/Design/AnnotationCodeGenerator.cs`
+- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`, `RelationalForeignKeyOverrides.cs` (debug strings)
+- Test: `test/EFCore.Design.Tests/Migrations/Design/CSharpMigrationsGeneratorTest.cs` (or the snapshot-generator test file in that project)
+
+**Interfaces:**
+- Consumes: the fluent API from Task B6.
+- Produces: `protected virtual void CSharpSnapshotGenerator.GenerateKeyOverrides(string keyBuilderName, IKey key, IndentedStringBuilder stringBuilder)` and the FK equivalent.
+
+- [ ] **Step 1: Write the failing test**
+
+```csharp
+[ConditionalFact]
+public void Snapshot_emits_per_store_object_key_constraint_names()
+{
+    var modelBuilder = CreateConventionalModelBuilder();
+    modelBuilder.Entity<Customer>(b =>
+    {
+        b.ToTable("Customers");
+        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+        b.HasKey(c => c.Id)
+            .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
+            .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
+    });
+
+    var code = GenerateSnapshotCode(modelBuilder.FinalizeModel());
+
+    Assert.Contains("\"pk_customers\"", code);
+    Assert.Contains("\"pk_customer_details\"", code);
+    Assert.DoesNotContain("HasAnnotation(\"Relational:KeyOverrides\"", code);
+}
+```
+
+Use the file's existing snapshot-generation helper in place of `GenerateSnapshotCode`.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj`
+Expected: FAIL — the names are missing entirely, or emitted as a raw annotation.
+
+- [ ] **Step 3: Register the annotation names as handled**
+
+In `src/EFCore.Relational/Design/AnnotationCodeGenerator.cs`, find where `RelationalAnnotationNames.RelationalOverrides` is registered for handling and add `KeyOverrides` and `ForeignKeyOverrides` alongside it. Without this, the raw annotation is emitted *in addition to* the fluent calls.
+
+- [ ] **Step 4: Emit the fluent calls**
+
+In `CSharpSnapshotGenerator`, add a method modeled on `GeneratePropertyOverrides` (`:1600`):
+
+```csharp
+    /// <summary>
+    ///     Generates code for per-store-object key constraint name overrides.
+    /// </summary>
+    /// <param name="keyBuilderName">The name of the builder variable.</param>
+    /// <param name="key">The key.</param>
+    /// <param name="stringBuilder">The builder code is added to.</param>
+    protected virtual void GenerateKeyOverrides(
+        string keyBuilderName,
+        IKey key,
+        IndentedStringBuilder stringBuilder)
+    {
+        foreach (var overrides in key.GetOverrides())
+        {
+            if (!overrides.IsNameOverridden)
+            {
+                continue;
+            }
+
+            stringBuilder
+                .AppendLine()
+                .Append(keyBuilderName)
+                .Append(".HasName(")
+                .Append(Code.UnknownLiteral(overrides.Name))
+                .Append(", ")
+                .Append(Code.UnknownLiteral(overrides.StoreObject))
+                .AppendLine(");");
+        }
+    }
+```
+
+`Code.UnknownLiteral(StoreObjectIdentifier)` may not have a literal generator. Check `ICSharpHelper` for `StoreObjectIdentifier` support; if there is none, emit the constructor call explicitly:
+
+```csharp
+                .Append("StoreObjectIdentifier.Table(")
+                .Append(Code.Literal(overrides.StoreObject.Name))
+                .Append(", ")
+                .Append(Code.Literal(overrides.StoreObject.Schema))
+                .Append(")")
+```
+
+Call `GenerateKeyOverrides` from wherever the generator emits key configuration (grep for `HasName` in the file to find the existing key-name emission and add the call directly after it). Write the FK equivalent, emitting both store objects.
+
+- [ ] **Step 5: Add debug strings**
+
+Both override classes already inherit the `ToString()` / `DebugView` shape from the Task B1 copy. Confirm `ToDebugString` produces something readable — `StoreObjectPair.ToString()` from Task B3 gives `UserLockout -> Users`, which is what an FK override should show.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/EFCore.Design/ src/EFCore.Relational/
+git commit -m "Emit per-store-object constraint names into snapshots
+
+Task B8. Overrides round-trip through migrations add instead of silently
+reverting to default constraint names."
+```
+
+---
+
+### Task B9: Differ, shared constraints, and the NamingConventions end-to-end
+
+Two remaining spec §4 checklist items — "shared-constraint/root-FK behavior when constraints are deduplicated across tables" — plus the proof that the whole thing solves the problem it was built for.
+
+**Spike 2 flagged shared-constraint deduplication as undesigned.** Decide it here: when two entity types share a table and their FKs collapse into one constraint, and the two carry *conflicting* overrides for the same `(dependent, principal)` pair, that is a model error, not a silent last-writer-wins. Add a validation error rather than picking a winner.
+
+**Files:**
+- Modify: `src/EFCore.Relational/Infrastructure/RelationalModelValidator.cs`
+- Modify: `src/EFCore.Relational/Properties/RelationalStrings.resx` + `.Designer.cs`
+- Test: `test/EFCore.Relational.Tests/Migrations/Internal/MigrationsModelDifferTest.cs`
+- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`
+
+**Interfaces:**
+- Consumes: all of Phase B so far.
+- Produces: `RelationalStrings.DuplicateConstraintNameOverride(table, constraintName, otherConstraintName)`.
+
+- [ ] **Step 1: Write the failing differ test**
+
+```csharp
+[ConditionalFact]
+public void Per_table_constraint_names_reach_migration_operations()
+{
+    Execute(
+        _ => { },
+        target => target.Entity<Customer>(b =>
+        {
+            b.ToTable("Customers");
+            b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+            b.HasKey(c => c.Id)
+                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
+                .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
+        }),
+        operations =>
+        {
+            var createTables = operations.OfType<CreateTableOperation>().ToList();
+
+            Assert.Equal(
+                "pk_customers",
+                createTables.Single(o => o.Name == "Customers").PrimaryKey!.Name);
+            Assert.Equal(
+                "pk_customer_details",
+                createTables.Single(o => o.Name == "CustomerDetails").PrimaryKey!.Name);
+        });
+}
+```
+
+Match the file's actual `Execute(...)` overload shape — it differs between the source/target-only and three-argument forms.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
+Expected: PASS already, in fact — Spike 2 finding 2 predicts the differ consumes the resolvers for free. **If it passes on the first run, keep the test**: it is the regression guard for that prediction. If it fails, the relational-model assumption has broken and must be fixed before continuing.
+
+- [ ] **Step 3: Write the failing shared-constraint conflict test**
+
+```csharp
+[ConditionalFact]
+public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+
+    // Two entity types sharing a table, each with a matching FK that deduplicates to one constraint.
+    modelBuilder.Entity<Order>(b =>
+    {
+        b.ToTable("Orders");
+        b.HasOne<Customer>().WithMany().HasForeignKey(o => o.CustomerId);
+    });
+    modelBuilder.Entity<OrderDetails>(b =>
+    {
+        b.ToTable("Orders");
+        b.HasOne<Customer>().WithMany().HasForeignKey(o => o.CustomerId);
+    });
+    modelBuilder.Entity<Customer>().ToTable("Customers");
+
+    var orders = StoreObjectIdentifier.Table("Orders");
+    var customers = StoreObjectIdentifier.Table("Customers");
+
+    foreach (var (entityClrType, name) in new[] { (typeof(Order), "fk_a"), (typeof(OrderDetails), "fk_b") })
+    {
+        var foreignKey = (IMutableForeignKey)modelBuilder.Model.FindEntityType(entityClrType)!
+            .GetForeignKeys().Single();
+        foreignKey.SetConstraintName(name, orders, customers);
+    }
+
+    Assert.Contains(
+        "fk_a",
+        Assert.Throws<InvalidOperationException>(() => modelBuilder.FinalizeModel()).Message);
+}
+```
+
+- [ ] **Step 4: Add the validation and its string**
+
+`.resx`:
+
+```xml
+  <data name="DuplicateConstraintNameOverride" xml:space="preserve">
+    <value>Entity types sharing table '{table}' configure conflicting constraint names '{constraintName}' and '{otherConstraintName}' for the same database constraint. Constraints shared across entity types must be configured with the same name.</value>
+  </data>
+```
+
+`.Designer.cs`:
+
+```csharp
+        /// <summary>
+        ///     Entity types sharing table '{table}' configure conflicting constraint names '{constraintName}' and '{otherConstraintName}' for the same database constraint. Constraints shared across entity types must be configured with the same name.
+        /// </summary>
+        public static string DuplicateConstraintNameOverride(object? table, object? constraintName, object? otherConstraintName)
+            => string.Format(
+                GetString("DuplicateConstraintNameOverride", nameof(table), nameof(constraintName), nameof(otherConstraintName)),
+                table, constraintName, otherConstraintName);
+```
+
+Add the check inside `RelationalModelValidator.ValidateSharedForeignKeysCompatibility` (grep for it — it already walks the FKs that deduplicate onto one constraint) comparing `GetConstraintName(storeObject, principalStoreObject)` across the sharing set and throwing on disagreement.
+
+- [ ] **Step 5: Write the NamingConventions-shaped end-to-end test**
+
+This is the acceptance test for the whole workstream — the shape that PR #396 had to work around by *deleting* names:
+
+```csharp
+[ConditionalFact]
+public void Rewriting_constraint_names_per_store_object_produces_no_collisions()
+{
+    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
+    modelBuilder.Entity<User>(b =>
+    {
+        b.ToTable("users");
+        b.SplitToTable("user_lockout", s => s.Property(u => u.PasswordHash));
+        b.SplitToTable("user_profile", s => s.Property(u => u.DisplayName));
+    });
+
+    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
+    var key = (IMutableKey)entityType.FindPrimaryKey()!;
+    var linkingForeignKey = (IMutableForeignKey)entityType.GetForeignKeys()
+        .Single(fk => fk.PrincipalEntityType == entityType);
+
+    var users = StoreObjectIdentifier.Table("users");
+    var lockout = StoreObjectIdentifier.Table("user_lockout");
+    var profile = StoreObjectIdentifier.Table("user_profile");
+
+    // What a naming convention does: rewrite per store object instead of writing one global name.
+    foreach (var table in new[] { users, lockout, profile })
+    {
+        key.SetName("pk_" + table.Name, table);
+    }
+
+    linkingForeignKey.SetConstraintName("fk_user_lockout_users_id", lockout, users);
+    linkingForeignKey.SetConstraintName("fk_user_profile_users_id", profile, users);
+
+    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
+
+    var constraintNames = relationalModel.Tables
+        .SelectMany(t => t.UniqueConstraints.Select(c => c.Name)
+            .Concat(t.ForeignKeyConstraints.Select(c => c.Name)))
+        .ToList();
+
+    // The #396 symptom was two identically named constraints; there must be none now.
+    Assert.Equal(constraintNames.Count, constraintNames.Distinct().Count());
+    Assert.Contains("pk_user_lockout", constraintNames);
+    Assert.Contains("fk_user_profile_users_id", constraintNames);
+}
+```
+
+- [ ] **Step 6: Run everything**
+
+```bash
+./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj
+./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/EFCore.Relational/ test/EFCore.Relational.Tests/
+git commit -m "Reject conflicting overrides on deduplicated constraints; prove the naming case
+
+Task B9. Differ carries per-table names into migration operations, and the
+EFCore.NamingConventions #396 collision shape now resolves collision-free."
+```
+
+---
+
+### Task B10: Baseline, provider sweep, and PR
+
+**Files:**
+- Modify: `src/EFCore.Relational/EFCore.Relational.baseline.json`
+
+**Interfaces:**
+- Consumes: all of Phase B.
+- Produces: the PR.
+
+- [ ] **Step 1: Update the API baseline**
+
+Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj --filter-class '*RelationalApiConsistencyTest'`
+
+Copy the canonical member strings from the failure output into `src/EFCore.Relational/EFCore.Relational.baseline.json`. Expect entries for: `StoreObjectPair`, `StoreObjectPairDictionary<T>`, `IReadOnlyStoreObjectPairDictionary<T>`, the eight override interfaces, the two runtime override types, the two conventions, and the new members on `RelationalKeyExtensions`, `RelationalForeignKeyExtensions`, `RelationalKeyBuilderExtensions`, `RelationalForeignKeyBuilderExtensions`, `IConventionKeyBuilder`, and `IConventionForeignKeyBuilder`.
+
+Re-run until green.
+
+- [ ] **Step 2: Sweep every provider**
+
+The change is in `EFCore.Relational`, so every provider inherits it.
+
+```bash
+./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj
+./build.sh --test --projects $PWD/test/EFCore.Sqlite.FunctionalTests/EFCore.Sqlite.FunctionalTests.csproj
+./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj
+./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj
+```
+
+Expected: PASS. Record actual counts.
+
+- [ ] **Step 3: Open the PR**
+
+```bash
+git push -u origin feature/per-store-object-constraint-names
+gh pr create --repo dotnet/efcore --base main \
+  --title "Support per-store-object key and foreign key constraint names" \
+  --body-file <(cat <<'BODY'
+Addresses #27972 and #27971.
+
+Key overrides are keyed by a single store object; foreign key overrides are
+keyed by the (dependent, principal) store-object pair, because one model
+foreign key serves every entity-splitting fragment's linking constraint.
+
+Unblocks efcore/EFCore.NamingConventions#396, which currently has to remove
+rewritten names for fragment-bearing entities rather than rewrite them per
+table.
+
+## Metadata checklist
+
+Global-name fallback precedence, explicit-null semantics (an override set to null
+suppresses a global rewritten name down to the default), shared-constraint conflict
+handling, `Attach`/`MergeInto` on key and FK re-creation, convention-versus-explicit
+configuration sources, runtime-model generation, snapshot generation, and debug output
+are all covered — see the tests in `RelationalKeyOverridesTest` and
+`RelationalForeignKeyOverridesTest`.
+
+Conflicting overrides on a constraint that deduplicates across table-sharing entity
+types are a validation error rather than last-writer-wins.
+
+## Left open
+
+- TPT root-FK behaviour.
+- View and function store-object types: the resolvers early-return for non-table store
+  objects today, and the overrides inherit that.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+BODY
+)
+```
+
+State explicitly in the body which spec §4 checklist items are covered and which are deliberately left open (TPT root-FK behaviour; view and function store-object types, which the resolvers early-return today and the overrides therefore inherit).
+
+- [ ] **Step 4: Commit the baseline**
+
+```bash
+git add src/EFCore.Relational/EFCore.Relational.baseline.json
+git commit -m "Baseline the per-store-object constraint name API
+
+Task B10."
+```
+
 ---
 
 # Phase A — Workstream A: asymmetric temporal entity splitting
+
+**Execute second.** Nothing here depends on Phase B, so branch from `main` — not from the Phase B branch.
 
 Branch: `git switch -c feature/temporal-entity-splitting main`
 
@@ -2993,1558 +4551,6 @@ State in the PR body whether Task A8's zero-generator-change hypothesis held, an
 git commit -am "Fix regressions found in the full-suite run
 
 Task A14."
-```
-
----
-# Phase B — Workstream B: per-store-object key and FK constraint names
-
-Branch: `git switch -c feature/per-store-object-constraint-names main`
-
-**What Spike 2 established, and what it did not.** The spike proved the *resolution* seams are exactly two functions and that the relational model consumes them untouched (5/5 green). What it explicitly shortcut — and what this phase must build properly — is the metadata family around them: typed override objects with configuration sources instead of raw `Dictionary` annotations, a convention-builder API instead of post-convention `OnModelCreating` writes, attach/merge survival, runtime-model conversion, snapshot codegen, and explicit-null semantics.
-
-**The identity asymmetry is the crux.** Key overrides are keyed by a single `StoreObjectIdentifier` — a PK/AK constraint materializes once per table. FK constraint-name resolution is a **table-pair** relationship (`GetConstraintName(in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`), and Spike 2 finding 1 confirmed why that matters: the entity-splitting linking constraint on every fragment maps to **one** self-referential model FK, so a single-store-object override could never name two fragments' linking constraints apart.
-
-### Task B1: Key override metadata family
-
-Mirrors `RelationalPropertyOverrides` — read `src/EFCore.Relational/Metadata/Internal/RelationalPropertyOverrides.cs` end to end before starting; this task is that file's structure with `Property` → `Key` and `ColumnName` → `Name`.
-
-**Files:**
-- Modify: `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`
-- Create: `src/EFCore.Relational/Metadata/IReadOnlyRelationalKeyOverrides.cs`, `IMutableRelationalKeyOverrides.cs`, `IConventionRelationalKeyOverrides.cs`, `IRelationalKeyOverrides.cs`
-- Create: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`
-- Create: `src/EFCore.Relational/Metadata/Builders/IConventionRelationalKeyOverridesBuilder.cs`, `src/EFCore.Relational/Metadata/Internal/InternalRelationalKeyOverridesBuilder.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs` *(new)*
-
-**Interfaces:**
-- Consumes: nothing (first task of Phase B).
-- Produces:
-  - `RelationalAnnotationNames.KeyOverrides` (`"Relational:KeyOverrides"`)
-  - `static IReadOnlyRelationalKeyOverrides? RelationalKeyOverrides.Find(IReadOnlyKey key, in StoreObjectIdentifier storeObject)`
-  - `static IEnumerable<IReadOnlyRelationalKeyOverrides>? RelationalKeyOverrides.Get(IReadOnlyKey key)`
-  - `static RelationalKeyOverrides RelationalKeyOverrides.GetOrCreate(IMutableKey key, in StoreObjectIdentifier storeObject, ConfigurationSource configurationSource)`
-  - `static RelationalKeyOverrides? RelationalKeyOverrides.Remove(IMutableKey key, in StoreObjectIdentifier storeObject)`
-  - instance members `StoreObject`, `Name`, `SetName(string?, ConfigurationSource)`, `IsNameOverridden`, `GetNameConfigurationSource()`
-
-- [ ] **Step 1: Write the failing test**
-
-Create `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`:
-
-```csharp
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-
-namespace Microsoft.EntityFrameworkCore.Metadata;
-
-public class RelationalKeyOverridesTest
-{
-    [ConditionalFact]
-    public void Key_overrides_are_stored_per_store_object_with_configuration_sources()
-    {
-        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-        modelBuilder.Entity<Customer>().ToTable("Customers");
-
-        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-        var customers = StoreObjectIdentifier.Table("Customers");
-        var details = StoreObjectIdentifier.Table("CustomerDetails");
-
-        Assert.Null(RelationalKeyOverrides.Find(key, customers));
-
-        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
-        overrides.SetName("pk_customers", ConfigurationSource.Explicit);
-
-        Assert.Equal("pk_customers", RelationalKeyOverrides.Find(key, customers)!.Name);
-        Assert.True(RelationalKeyOverrides.Find(key, customers)!.IsNameOverridden);
-        Assert.Null(RelationalKeyOverrides.Find(key, details));
-
-        // A convention-source write must not clobber an explicit one.
-        RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Convention)
-            .SetName("pk_convention", ConfigurationSource.Convention);
-        Assert.Equal("pk_customers", RelationalKeyOverrides.Find(key, customers)!.Name);
-    }
-
-    [ConditionalFact]
-    public void Explicit_null_name_override_is_distinguishable_from_unset()
-    {
-        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-        modelBuilder.Entity<Customer>().ToTable("Customers");
-
-        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-        var customers = StoreObjectIdentifier.Table("Customers");
-
-        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
-        overrides.SetName(null, ConfigurationSource.Explicit);
-
-        // Set-to-null means "suppress the name for this store object", not "no override configured".
-        Assert.True(overrides.IsNameOverridden);
-        Assert.Null(overrides.Name);
-    }
-
-    [ConditionalFact]
-    public void Removing_an_override_detaches_it_from_the_model()
-    {
-        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-        modelBuilder.Entity<Customer>().ToTable("Customers");
-
-        var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-        var customers = StoreObjectIdentifier.Table("Customers");
-
-        var overrides = RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit);
-        Assert.True(overrides.IsInModel);
-
-        Assert.Same(overrides, RelationalKeyOverrides.Remove(key, customers));
-        Assert.False(overrides.IsInModel);
-        Assert.Null(RelationalKeyOverrides.Find(key, customers));
-    }
-
-    private class Customer
-    {
-        public int Id { get; set; }
-        public string Name { get; set; } = null!;
-    }
-}
-```
-
-The `SetName` precedence assertion in the first test is the *semantic* being specified: `ConfigurationSource.Max` on write, so a convention cannot lower an explicit value. That mirrors `RelationalPropertyOverrides.SetColumnName`.
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: compile error — `RelationalKeyOverrides` does not exist.
-
-- [ ] **Step 3: Add the annotation name**
-
-In `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`, next to `RelationalOverrides` (`:325`):
-
-```csharp
-    /// <summary>
-    ///     The name for per-store-object key constraint name overrides.
-    /// </summary>
-    public const string KeyOverrides = Prefix + "KeyOverrides";
-```
-
-and add `KeyOverrides` to the `AllNames` array around `:442`.
-
-- [ ] **Step 4: Create the interface quartet**
-
-Copy `IReadOnlyRelationalPropertyOverrides.cs`, `IMutableRelationalPropertyOverrides.cs`, `IConventionRelationalPropertyOverrides.cs`, and `IRelationalPropertyOverrides.cs` to the `*RelationalKeyOverrides*` equivalents, applying exactly these substitutions and nothing else:
-
-| In the property-overrides file | In the key-overrides file |
-|---|---|
-| `RelationalPropertyOverrides` | `RelationalKeyOverrides` |
-| `Property` (the member and its types `IReadOnlyProperty`/`IMutableProperty`/`IConventionProperty`/`IProperty`) | `Key` (`IReadOnlyKey`/`IMutableKey`/`IConventionKey`/`IKey`) |
-| `ColumnName` | `Name` |
-| `IsColumnNameOverridden` | `IsNameOverridden` |
-| `GetColumnNameConfigurationSource` | `GetNameConfigurationSource` |
-| `SetColumnName` | `SetName` |
-| `RemoveColumnNameOverride` | `RemoveNameOverride` |
-
-Keep the `<summary>` text meaningful — rewrite "column name" as "key constraint name" rather than leaving the property wording in place.
-
-- [ ] **Step 5: Create `RelationalKeyOverrides`**
-
-Apply the same substitution table to `src/EFCore.Relational/Metadata/Internal/RelationalPropertyOverrides.cs`, with these three deliberate differences:
-
-1. The annotation read/write uses `RelationalAnnotationNames.KeyOverrides`, not `RelationalOverrides`.
-2. The constructor's model access goes through the key: `((IConventionModel)key.DeclaringEntityType.Model).Builder`.
-3. `IsReadOnly` delegates to the key: `((Annotatable)Key).IsReadOnly`.
-
-For reference, the two static entry points come out as:
-
-```csharp
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    public static IReadOnlyRelationalKeyOverrides? Find(IReadOnlyKey key, in StoreObjectIdentifier storeObject)
-        => ((IReadOnlyStoreObjectDictionary<IReadOnlyRelationalKeyOverrides>?)key[RelationalAnnotationNames.KeyOverrides])
-            ?.Find(storeObject);
-
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    public static RelationalKeyOverrides GetOrCreate(
-        IMutableKey key,
-        in StoreObjectIdentifier storeObject,
-        ConfigurationSource configurationSource)
-    {
-        var keyOverrides = (StoreObjectDictionary<RelationalKeyOverrides>?)key[RelationalAnnotationNames.KeyOverrides];
-        if (keyOverrides == null)
-        {
-            keyOverrides = new StoreObjectDictionary<RelationalKeyOverrides>();
-            key[RelationalAnnotationNames.KeyOverrides] = keyOverrides;
-        }
-
-        var overrides = keyOverrides.Find(storeObject);
-        if (overrides == null)
-        {
-            overrides = new RelationalKeyOverrides(key, storeObject, configurationSource);
-            keyOverrides.Add(storeObject, overrides);
-        }
-        else
-        {
-            overrides.UpdateConfigurationSource(configurationSource);
-        }
-
-        return overrides;
-    }
-```
-
-- [ ] **Step 6: Create the builder pair**
-
-Apply the substitution table to `IConventionRelationalPropertyOverridesBuilder.cs` and `InternalRelationalPropertyOverridesBuilder.cs`. The only method is `HasColumnName` → `HasName`.
-
-- [ ] **Step 7: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs
-git commit -m "Add the per-store-object key constraint name override family
-
-Task B1. Patterned on RelationalPropertyOverrides with single-store-object
-identity, typed overrides, and configuration sources."
-```
-
----
-
-### Task B2: Key name resolution seam
-
-Spike 2 finding: the two `(string?)key[RelationalAnnotationNames.Name] ?? defaultName` expressions in `RelationalKeyExtensions.GetName(key, storeObject, logger)` are the **entire** global-name fallback — a single seam in two branches. This task turns the spike's raw-dictionary lookup into a real one and pins the precedence.
-
-Precedence, from most to least specific: **per-store-object override → global `Relational:Name` annotation → default generated name.** An override whose name is explicitly `null` suppresses down to the default name rather than falling through to the global annotation, because "I explicitly do not want the global rewritten name here" is exactly the NamingConventions #396 use case.
-
-**Files:**
-- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`
-
-**Interfaces:**
-- Consumes: `RelationalKeyOverrides.Find` from Task B1.
-- Produces: no new signature — `GetName(key, storeObject, logger)` gains override awareness.
-
-- [ ] **Step 1: Write the failing test**
-
-```csharp
-[ConditionalFact]
-public void Key_name_override_beats_the_global_rewritten_name_per_table()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-    });
-
-    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-    var customers = StoreObjectIdentifier.Table("Customers");
-    var details = StoreObjectIdentifier.Table("CustomerDetails");
-
-    // The NamingConventions #396 collision shape: one global rewritten name for two tables.
-    key.SetName("pk_global_rewrite");
-    Assert.Equal("pk_global_rewrite", key.GetName(customers));
-    Assert.Equal("pk_global_rewrite", key.GetName(details));
-
-    RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit)
-        .SetName("pk_customers", ConfigurationSource.Explicit);
-    RelationalKeyOverrides.GetOrCreate(key, details, ConfigurationSource.Explicit)
-        .SetName("pk_customer_details", ConfigurationSource.Explicit);
-
-    Assert.Equal("pk_customers", key.GetName(customers));
-    Assert.Equal("pk_customer_details", key.GetName(details));
-}
-
-[ConditionalFact]
-public void Explicit_null_key_name_override_falls_back_to_the_default_name()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-    });
-
-    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-    var details = StoreObjectIdentifier.Table("CustomerDetails");
-
-    key.SetName("pk_global_rewrite");
-    RelationalKeyOverrides.GetOrCreate(key, details, ConfigurationSource.Explicit)
-        .SetName(null, ConfigurationSource.Explicit);
-
-    Assert.Equal("PK_CustomerDetails", key.GetName(details));
-}
-
-[ConditionalFact]
-public void Per_table_key_names_flow_into_the_relational_model()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-    });
-
-    var key = (IMutableKey)modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-    RelationalKeyOverrides.GetOrCreate(key, StoreObjectIdentifier.Table("Customers"), ConfigurationSource.Explicit)
-        .SetName("pk_customers", ConfigurationSource.Explicit);
-    RelationalKeyOverrides.GetOrCreate(key, StoreObjectIdentifier.Table("CustomerDetails"), ConfigurationSource.Explicit)
-        .SetName("pk_customer_details", ConfigurationSource.Explicit);
-
-    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
-
-    Assert.Equal(
-        "pk_customers",
-        relationalModel.Tables.Single(t => t.Name == "Customers").UniqueConstraints.Single().Name);
-    Assert.Equal(
-        "pk_customer_details",
-        relationalModel.Tables.Single(t => t.Name == "CustomerDetails").UniqueConstraints.Single().Name);
-}
-```
-
-The third test is Spike 2's finding 2 turned into a regression test: `RelationalModel` builds constraint names by calling these same resolvers, so correct resolution propagates to the differ for free.
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: FAIL — both tables still resolve `pk_global_rewrite`.
-
-- [ ] **Step 3: Insert the override lookup**
-
-In `src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs`, in `GetName(key, storeObject, logger)`, replace **both** `(string?)key[RelationalAnnotationNames.Name] ?? defaultName` expressions with a call to a shared local, and add the helper:
-
-```csharp
-        if (fragment != null)
-        {
-            return defaultName != null
-                ? ResolveName(key, storeObject, defaultName)
-                : null;
-        }
-
-        foreach (var containingType in declaringType.GetDerivedTypesInclusive())
-        {
-            if (StoreObjectIdentifier.Create(containingType, storeObject.StoreObjectType) == storeObject)
-            {
-                return defaultName != null
-                    ? ResolveName(key, storeObject, defaultName)
-                    : null;
-            }
-        }
-
-        return null;
-
-        static string? ResolveName(IReadOnlyKey key, in StoreObjectIdentifier storeObject, string defaultName)
-        {
-            // Per-store-object override wins over the global name, which wins over the default. An
-            // override set explicitly to null suppresses the global name down to the default, which is
-            // what lets a naming convention opt one table out of a global rewrite.
-            var overrides = RelationalKeyOverrides.Find(key, storeObject);
-            if (overrides is { IsNameOverridden: true })
-            {
-                return overrides.Name ?? defaultName;
-            }
-
-            return (string?)key[RelationalAnnotationNames.Name] ?? defaultName;
-        }
-```
-
-A local function cannot take an `in` parameter alongside a closure over `storeObject`, so pass `storeObject` explicitly as shown rather than capturing it.
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/Internal/RelationalKeyExtensions.cs \
-        test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs
-git commit -m "Resolve key constraint names through per-store-object overrides
-
-Task B2. Override beats the global name beats the default; an explicitly null
-override suppresses a global rewrite for one table."
-```
-
----
-### Task B3: FK override metadata family with composite identity
-
-The dimensionality difference. Spike 2 finding 1: the entity-splitting linking constraint on `UserLockout` reports exactly **one** mapped model FK (`SpikeUser.[Id] → SpikeUser`, `unique=true`), and that same FK object serves *every* fragment's linking constraint. A single-store-object override cannot name them apart. The override key is therefore the pair `(dependentStoreObject, principalStoreObject)`.
-
-**Files:**
-- Create: `src/EFCore.Relational/Metadata/StoreObjectPair.cs` and `StoreObjectPairDictionary.cs`, `IReadOnlyStoreObjectPairDictionary.cs`
-- Create: the `*RelationalForeignKeyOverrides*` interface quartet, implementation, and builder pair
-- Modify: `src/EFCore.Relational/Metadata/RelationalAnnotationNames.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs` *(new)*
-
-**Interfaces:**
-- Consumes: the shape established in Task B1.
-- Produces:
-  - `readonly record struct StoreObjectPair(StoreObjectIdentifier DependentStoreObject, StoreObjectIdentifier PrincipalStoreObject)`
-  - `StoreObjectPairDictionary<T>` with `Find(in StoreObjectPair)`, `GetValues()`, `Add`, `Remove`
-  - `RelationalAnnotationNames.ForeignKeyOverrides` (`"Relational:ForeignKeyOverrides"`)
-  - `static IReadOnlyRelationalForeignKeyOverrides? RelationalForeignKeyOverrides.Find(IReadOnlyForeignKey foreignKey, in StoreObjectPair storeObjects)`
-  - `static RelationalForeignKeyOverrides RelationalForeignKeyOverrides.GetOrCreate(IMutableForeignKey foreignKey, in StoreObjectPair storeObjects, ConfigurationSource configurationSource)`
-  - plus `Get`, `Remove`, and the same instance members as Task B1 (`Name`, `SetName`, `IsNameOverridden`, `GetNameConfigurationSource`)
-
-- [ ] **Step 1: Write the failing test**
-
-Create `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`:
-
-```csharp
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-
-namespace Microsoft.EntityFrameworkCore.Metadata;
-
-public class RelationalForeignKeyOverridesTest
-{
-    [ConditionalFact]
-    public void Two_fragments_of_one_entity_share_a_single_model_foreign_key()
-    {
-        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-        modelBuilder.Entity<User>(b =>
-        {
-            b.ToTable("Users");
-            b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
-            b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
-        });
-
-        var model = modelBuilder.FinalizeModel();
-        var entityType = model.FindEntityType(typeof(User))!;
-
-        // Spike 2 finding 1: one self-referential FK serves every fragment's linking constraint,
-        // which is why override identity must be the (dependent, principal) pair.
-        var linkingForeignKeys = entityType.GetForeignKeys()
-            .Where(fk => fk.PrincipalEntityType == entityType)
-            .ToList();
-        Assert.Single(linkingForeignKeys);
-    }
-
-    [ConditionalFact]
-    public void Foreign_key_overrides_are_keyed_by_the_dependent_principal_pair()
-    {
-        var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-        modelBuilder.Entity<User>(b =>
-        {
-            b.ToTable("Users");
-            b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
-            b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
-        });
-
-        var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
-        var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
-            .Single(fk => fk.PrincipalEntityType == entityType);
-
-        var users = StoreObjectIdentifier.Table("Users");
-        var lockoutPair = new StoreObjectPair(StoreObjectIdentifier.Table("UserLockout"), users);
-        var profilePair = new StoreObjectPair(StoreObjectIdentifier.Table("UserProfile"), users);
-
-        RelationalForeignKeyOverrides.GetOrCreate(foreignKey, lockoutPair, ConfigurationSource.Explicit)
-            .SetName("fk_user_lockout", ConfigurationSource.Explicit);
-        RelationalForeignKeyOverrides.GetOrCreate(foreignKey, profilePair, ConfigurationSource.Explicit)
-            .SetName("fk_user_profile", ConfigurationSource.Explicit);
-
-        // One FK object, two distinctly named constraints — impossible with single-store-object identity.
-        Assert.Equal("fk_user_lockout", RelationalForeignKeyOverrides.Find(foreignKey, lockoutPair)!.Name);
-        Assert.Equal("fk_user_profile", RelationalForeignKeyOverrides.Find(foreignKey, profilePair)!.Name);
-    }
-
-    [ConditionalFact]
-    public void Store_object_pair_equality_is_order_sensitive()
-    {
-        var a = StoreObjectIdentifier.Table("A");
-        var b = StoreObjectIdentifier.Table("B");
-
-        Assert.Equal(new StoreObjectPair(a, b), new StoreObjectPair(a, b));
-        Assert.NotEqual(new StoreObjectPair(a, b), new StoreObjectPair(b, a));
-        Assert.NotEqual(new StoreObjectPair(a, b).GetHashCode(), new StoreObjectPair(b, a).GetHashCode());
-    }
-
-    private class User
-    {
-        public int Id { get; set; }
-        public string PasswordHash { get; set; } = null!;
-        public string DisplayName { get; set; } = null!;
-    }
-}
-```
-
-The hash-code assertion could in principle collide by chance; if it proves flaky, drop that one line and keep the two equality assertions.
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: compile error — `StoreObjectPair` and `RelationalForeignKeyOverrides` do not exist. The first test should compile and pass on its own once those types exist; it documents the spike finding and needs no new production code.
-
-- [ ] **Step 3: Create the pair key**
-
-Create `src/EFCore.Relational/Metadata/StoreObjectPair.cs`:
-
-```csharp
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-
-namespace Microsoft.EntityFrameworkCore.Metadata;
-
-/// <summary>
-///     Identifies a foreign key constraint by the pair of store objects it connects.
-/// </summary>
-/// <remarks>
-///     A foreign key constraint name is a relationship between two tables, not a property of one:
-///     a single model foreign key can materialize as several constraints, one per dependent table.
-/// </remarks>
-/// <param name="DependentStoreObject">The store object holding the constraint.</param>
-/// <param name="PrincipalStoreObject">The store object the constraint references.</param>
-public readonly record struct StoreObjectPair(
-    StoreObjectIdentifier DependentStoreObject,
-    StoreObjectIdentifier PrincipalStoreObject)
-{
-    /// <summary>
-    ///     Returns a readable representation of the pair.
-    /// </summary>
-    /// <returns>The display string.</returns>
-    public override string ToString()
-        => $"{DependentStoreObject.DisplayName()} -> {PrincipalStoreObject.DisplayName()}";
-}
-```
-
-A `record struct` gives value equality and a correct order-sensitive hash code for free.
-
-- [ ] **Step 4: Create the pair dictionary**
-
-Create `src/EFCore.Relational/Metadata/StoreObjectPairDictionary.cs` and `IReadOnlyStoreObjectPairDictionary.cs` by applying `StoreObjectIdentifier` → `StoreObjectPair` to `StoreObjectDictionary.cs` and `IReadOnlyStoreObjectDictionary.cs`. The one substantive change is `GetValues()`, whose ordering must stay deterministic for snapshot generation:
-
-```csharp
-    /// <inheritdoc />
-    public virtual IEnumerable<T> GetValues()
-        => _dictionary
-            .OrderBy(pair => pair.Key.DependentStoreObject.Name, StringComparer.Ordinal)
-            .ThenBy(pair => pair.Key.PrincipalStoreObject.Name, StringComparer.Ordinal)
-            .Select(pair => pair.Value);
-```
-
-- [ ] **Step 5: Add the annotation name**
-
-In `RelationalAnnotationNames.cs`, next to the `KeyOverrides` constant from Task B1:
-
-```csharp
-    /// <summary>
-    ///     The name for per-store-object-pair foreign key constraint name overrides.
-    /// </summary>
-    public const string ForeignKeyOverrides = Prefix + "ForeignKeyOverrides";
-```
-
-and add it to the `AllNames` array.
-
-- [ ] **Step 6: Create the FK override family**
-
-Apply the Task B1 substitution table to the *key* override files you just wrote, with these differences:
-
-| In `RelationalKeyOverrides` | In `RelationalForeignKeyOverrides` |
-|---|---|
-| `IReadOnlyKey` / `IMutableKey` / `IConventionKey` / `IKey` | `IReadOnlyForeignKey` / `IMutableForeignKey` / `IConventionForeignKey` / `IForeignKey` |
-| `StoreObjectIdentifier StoreObject` | `StoreObjectPair StoreObjects` |
-| `StoreObjectDictionary<RelationalKeyOverrides>` | `StoreObjectPairDictionary<RelationalForeignKeyOverrides>` |
-| `RelationalAnnotationNames.KeyOverrides` | `RelationalAnnotationNames.ForeignKeyOverrides` |
-| `key.DeclaringEntityType.Model` | `foreignKey.DeclaringEntityType.Model` |
-
-Everything else — configuration sources, `IsInModel`, `SetRemovedFromModel`, `DebugView`, `ToString` — carries over unchanged.
-
-- [ ] **Step 7: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs
-git commit -m "Add the per-store-object-pair foreign key name override family
-
-Task B3. Composite (dependent, principal) identity, because one model FK
-serves every entity-splitting fragment's linking constraint."
-```
-
----
-
-### Task B4: FK constraint name resolution seam
-
-**Files:**
-- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`
-
-**Interfaces:**
-- Consumes: `RelationalForeignKeyOverrides.Find` from Task B3.
-- Produces: no new signature — `GetConstraintName(fk, storeObject, principalStoreObject, logger)` gains override awareness.
-
-- [ ] **Step 1: Write the failing test**
-
-```csharp
-[ConditionalFact]
-public void Foreign_key_name_overrides_resolve_per_pair_and_reach_the_relational_model()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<User>(b =>
-    {
-        b.ToTable("Users");
-        b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
-        b.SplitToTable("UserProfile", s => s.Property(u => u.DisplayName));
-    });
-
-    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
-    var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
-        .Single(fk => fk.PrincipalEntityType == entityType);
-
-    var users = StoreObjectIdentifier.Table("Users");
-    var lockout = StoreObjectIdentifier.Table("UserLockout");
-    var profile = StoreObjectIdentifier.Table("UserProfile");
-
-    RelationalForeignKeyOverrides.GetOrCreate(
-        foreignKey, new StoreObjectPair(lockout, users), ConfigurationSource.Explicit)
-        .SetName("fk_user_lockout", ConfigurationSource.Explicit);
-    RelationalForeignKeyOverrides.GetOrCreate(
-        foreignKey, new StoreObjectPair(profile, users), ConfigurationSource.Explicit)
-        .SetName("fk_user_profile", ConfigurationSource.Explicit);
-
-    Assert.Equal("fk_user_lockout", foreignKey.GetConstraintName(lockout, users));
-    Assert.Equal("fk_user_profile", foreignKey.GetConstraintName(profile, users));
-
-    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
-    Assert.Equal(
-        "fk_user_lockout",
-        relationalModel.Tables.Single(t => t.Name == "UserLockout").ForeignKeyConstraints.Single().Name);
-    Assert.Equal(
-        "fk_user_profile",
-        relationalModel.Tables.Single(t => t.Name == "UserProfile").ForeignKeyConstraints.Single().Name);
-}
-
-[ConditionalFact]
-public void Foreign_key_override_does_not_apply_where_the_constraint_does_not_materialize()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<User>(b =>
-    {
-        b.ToTable("Users");
-        b.SplitToTable("UserLockout", s => s.Property(u => u.PasswordHash));
-    });
-
-    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
-    var foreignKey = (IMutableForeignKey)entityType.GetForeignKeys()
-        .Single(fk => fk.PrincipalEntityType == entityType);
-
-    var users = StoreObjectIdentifier.Table("Users");
-    var absent = StoreObjectIdentifier.Table("NotAMappedTable");
-
-    RelationalForeignKeyOverrides.GetOrCreate(
-        foreignKey, new StoreObjectPair(absent, users), ConfigurationSource.Explicit)
-        .SetName("fk_nowhere", ConfigurationSource.Explicit);
-
-    // The override is gated on the constraint actually materializing (defaultName != null).
-    Assert.Null(foreignKey.GetConstraintName(absent, users));
-}
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: FAIL — both pairs resolve the same default `FK_...` name.
-
-- [ ] **Step 3: Insert the override lookup**
-
-In `src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs`, in `GetConstraintName(foreignKey, storeObject, principalStoreObject, logger)`, between the `defaultName` computation and the global annotation read:
-
-```csharp
-        var defaultName = foreignKey.GetDefaultName(storeObject, principalStoreObject, logger);
-
-        // Gated on defaultName: an override only applies where the constraint actually materializes,
-        // which keeps override storage from inventing constraints on unmapped store objects.
-        if (defaultName != null
-            && RelationalForeignKeyOverrides.Find(foreignKey, new StoreObjectPair(storeObject, principalStoreObject))
-                is { IsNameOverridden: true } overrides)
-        {
-            return overrides.Name ?? defaultName;
-        }
-
-        var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
-        return annotation != null && defaultName != null
-            ? (string?)annotation.Value
-            : defaultName;
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS. Spike 2 finding 2 says `RelationalModel` builds `ForeignKeyConstraint` names through this same function, so the relational-model half of the first test should pass with no further changes — if it does not, that assumption has broken and needs investigating before continuing.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/Internal/RelationalForeignKeyExtensions.cs \
-        test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs
-git commit -m "Resolve FK constraint names through per-pair overrides
-
-Task B4. Override applies only where the constraint materializes, so storage
-cannot invent constraints on unmapped store objects."
-```
-
----
-### Task B5: Attach, merge, and survival through model rebuilding
-
-Spec §4's checklist item "`Attach`/`Detach`/`MergeInto` behavior on entity-type re-parenting". Keys and foreign keys are routinely detached and re-created during model building (`InternalEntityTypeBuilder.DetachKeys`, `InternalForeignKeyBuilder`, `InternalTypeBaseBuilder`). Annotation *values* survive that via `MergeAnnotationsFrom`, but the `RelationalKeyOverrides` objects inside them would keep a stale `Key` reference and a dead builder — which is precisely what `RelationalPropertyOverrides.Attach`/`MergeInto` exists to fix for properties.
-
-**Files:**
-- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`, `RelationalForeignKeyOverrides.cs`
-- Create: `src/EFCore.Relational/Metadata/Conventions/KeyOverridesConvention.cs`, `ForeignKeyOverridesConvention.cs`
-- Modify: `src/EFCore.Relational/Metadata/Conventions/Infrastructure/RelationalConventionSetBuilder.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalKeyOverridesTest.cs`, `RelationalForeignKeyOverridesTest.cs`
-
-**Interfaces:**
-- Consumes: Tasks B1 and B3.
-- Produces:
-  - `static void RelationalKeyOverrides.Attach(IConventionKey key, IConventionRelationalKeyOverrides detachedOverrides)`
-  - `static RelationalKeyOverrides RelationalKeyOverrides.MergeInto(IConventionRelationalKeyOverrides detached, IConventionRelationalKeyOverrides existing)`
-  - the two FK equivalents, taking `IConventionForeignKey`
-  - `KeyOverridesConvention : IKeyAddedConvention`, `ForeignKeyOverridesConvention : IForeignKeyAddedConvention`
-
-- [ ] **Step 1: Write the failing test**
-
-```csharp
-[ConditionalFact]
-public void Key_overrides_survive_key_redefinition()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-    });
-
-    var entityType = modelBuilder.Model.FindEntityType(typeof(Customer))!;
-    var key = (IMutableKey)entityType.FindPrimaryKey()!;
-    var customers = StoreObjectIdentifier.Table("Customers");
-
-    RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit)
-        .SetName("pk_customers", ConfigurationSource.Explicit);
-
-    // Redefining the key detaches and re-creates it.
-    modelBuilder.Entity<Customer>().HasKey(c => c.Id);
-
-    var newKey = modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-    Assert.Equal("pk_customers", newKey.GetName(customers));
-}
-```
-
-Write the FK analogue in `RelationalForeignKeyOverridesTest.cs`, redefining the relationship via `HasOne(...).WithMany(...)` and asserting the pair-keyed override still resolves.
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: FAIL — the override is lost, or resolves through a stale key.
-
-- [ ] **Step 3: Add `Attach` and `MergeInto`**
-
-To `RelationalKeyOverrides`, mirroring `RelationalPropertyOverrides.cs:107–135`:
-
-```csharp
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    public static void Attach(IConventionKey key, IConventionRelationalKeyOverrides detachedOverrides)
-    {
-        var newOverrides = GetOrCreate(
-            (IMutableKey)key,
-            detachedOverrides.StoreObject,
-            detachedOverrides.GetConfigurationSource());
-
-        MergeInto(detachedOverrides, newOverrides);
-    }
-
-    /// <summary>
-    ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
-    ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
-    ///     any release. You should only use it directly in your code with extreme caution and knowing that
-    ///     doing so can result in application failures when updating to a new Entity Framework Core release.
-    /// </summary>
-    public static RelationalKeyOverrides MergeInto(
-        IConventionRelationalKeyOverrides detachedOverrides,
-        IConventionRelationalKeyOverrides existingOverrides)
-    {
-        var nameConfigurationSource = detachedOverrides.GetNameConfigurationSource();
-        if (nameConfigurationSource != null)
-        {
-            existingOverrides = ((InternalRelationalKeyOverridesBuilder)existingOverrides.Builder)
-                .HasName(detachedOverrides.Name, nameConfigurationSource.Value)
-                !.Metadata;
-        }
-
-        return ((InternalRelationalKeyOverridesBuilder)existingOverrides.Builder)
-            .MergeAnnotationsFrom((RelationalKeyOverrides)detachedOverrides)
-            .Metadata;
-    }
-```
-
-Write the FK versions the same way, taking `IConventionForeignKey` and `detachedOverrides.StoreObjects`.
-
-- [ ] **Step 4: Add the two conventions**
-
-Create `src/EFCore.Relational/Metadata/Conventions/KeyOverridesConvention.cs` following `PropertyOverridesConvention.cs` exactly — same constructor, same `Dependencies`/`RelationalDependencies` properties, same "collect stale, remove, re-attach" body — implementing `IKeyAddedConvention` instead of `IPropertyAddedConvention`:
-
-```csharp
-    /// <inheritdoc />
-    public virtual void ProcessKeyAdded(
-        IConventionKeyBuilder keyBuilder,
-        IConventionContext<IConventionKeyBuilder> context)
-    {
-        var key = keyBuilder.Metadata;
-
-        List<IConventionRelationalKeyOverrides>? overridesToReattach = null;
-        foreach (var overrides in key.GetOverrides())
-        {
-            if (overrides.Key == key)
-            {
-                continue;
-            }
-
-            overridesToReattach ??= [];
-            overridesToReattach.Add(overrides);
-        }
-
-        if (overridesToReattach == null)
-        {
-            return;
-        }
-
-        foreach (var overrides in overridesToReattach)
-        {
-            var removedOverrides = key.RemoveOverrides(overrides.StoreObject);
-            if (removedOverrides != null)
-            {
-                RelationalKeyOverrides.Attach(key, removedOverrides);
-            }
-        }
-    }
-```
-
-This needs `GetOverrides()` / `RemoveOverrides(storeObject)` convenience extensions on `IConventionKey`; add them to `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs` in Task B6 alongside the rest of the public surface, or add them as internal helpers here and promote them there.
-
-Note the difference from `PropertyOverridesConvention`: that convention early-returns for non-shared-CLR-type declaring types, because property overrides only go stale under shared-type entity types. Keys and FKs go stale under any detach/re-create, so **there is no early return here**.
-
-Write `ForeignKeyOverridesConvention` the same way over `IForeignKeyAddedConvention` and `StoreObjects`.
-
-- [ ] **Step 5: Register the conventions**
-
-In `src/EFCore.Relational/Metadata/Conventions/Infrastructure/RelationalConventionSetBuilder.cs`, next to `:68`:
-
-```csharp
-        conventionSet.Add(new PropertyOverridesConvention(Dependencies, RelationalDependencies));
-        conventionSet.Add(new KeyOverridesConvention(Dependencies, RelationalDependencies));
-        conventionSet.Add(new ForeignKeyOverridesConvention(Dependencies, RelationalDependencies));
-```
-
-`ConventionSetTest`-style tests assert the full convention list in some providers; if one fails, add the two new conventions to its expected list.
-
-- [ ] **Step 6: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/ test/EFCore.Relational.Tests/Metadata/
-git commit -m "Re-attach key and FK overrides when the key or FK is re-created
-
-Task B5. Overrides now survive key redefinition and relationship
-reconfiguration during model building."
-```
-
----
-
-### Task B6: Public and convention configuration API
-
-Spec §4, "Convention seam": `key.Builder.HasName(name, storeObject)` and the FK pair equivalent are exactly what EFCore.NamingConventions needs, plus public fluent equivalents for hand-written models.
-
-**Files:**
-- Modify: `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs`, `RelationalForeignKeyExtensions.cs`
-- Modify: `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`, `RelationalForeignKeyBuilderExtensions.cs`
-- Modify: `src/EFCore.Relational/Metadata/Builders/IConventionKeyBuilder.cs` (+ its internal implementation), and the FK equivalent
-- Test: `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs`
-
-**Interfaces:**
-- Consumes: Tasks B1–B5.
-- Produces:
-  - `static void RelationalKeyExtensions.SetName(this IMutableKey key, string? name, in StoreObjectIdentifier storeObject)`
-  - `static string? RelationalKeyExtensions.SetName(this IConventionKey key, string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
-  - `static ConfigurationSource? RelationalKeyExtensions.GetNameConfigurationSource(this IConventionKey key, in StoreObjectIdentifier storeObject)`
-  - `static IEnumerable<IReadOnlyRelationalKeyOverrides> RelationalKeyExtensions.GetOverrides(this IReadOnlyKey key)` and `IMutableRelationalKeyOverrides? RemoveOverrides(this IMutableKey key, in StoreObjectIdentifier storeObject)`
-  - `static KeyBuilder RelationalKeyBuilderExtensions.HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)` and the generic `KeyBuilder<TEntity>` overload
-  - `IConventionKeyBuilder? IConventionKeyBuilder.HasName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)` and `bool CanSetName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
-  - the FK equivalents, all taking both store objects — named explicitly because later tasks call them:
-    - `static void RelationalForeignKeyExtensions.SetConstraintName(this IMutableForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
-    - `static string? RelationalForeignKeyExtensions.SetConstraintName(this IConventionForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)`
-    - `static ConfigurationSource? RelationalForeignKeyExtensions.GetConstraintNameConfigurationSource(this IConventionForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
-    - `static IEnumerable<IReadOnlyRelationalForeignKeyOverrides> RelationalForeignKeyExtensions.GetOverrides(this IReadOnlyForeignKey foreignKey)` and `IMutableRelationalForeignKeyOverrides? RemoveOverrides(this IMutableForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
-    - `static ReferenceCollectionBuilder RelationalForeignKeyBuilderExtensions.HasConstraintName(this ReferenceCollectionBuilder builder, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`, plus the generic and `ReferenceReferenceBuilder` overloads that the existing `HasConstraintName(string?)` already has — mirror that method's full overload set exactly
-    - `IConventionForeignKeyBuilder? IConventionForeignKeyBuilder.HasConstraintName(string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)` and the matching `CanSetConstraintName`
-
-Each FK extension constructs the `StoreObjectPair` internally, so callers never handle the pair type unless they want to.
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs`:
-
-```csharp
-[ConditionalFact]
-public virtual void Can_configure_per_table_key_and_foreign_key_constraint_names()
-{
-    var modelBuilder = CreateModelBuilder();
-
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-        b.HasKey(c => c.Id)
-            .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
-            .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
-    });
-
-    var model = modelBuilder.FinalizeModel();
-    var key = model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-
-    Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers")));
-    Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails")));
-}
-```
-
-Chaining two `HasName` calls proves the fluent overload returns the builder and that two overrides coexist.
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: compile error — `HasName` has no store-object overload.
-
-- [ ] **Step 3: Add the metadata extensions**
-
-To `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs`, next to the existing `SetName` members:
-
-```csharp
-    /// <summary>
-    ///     Sets the key constraint name for this key for a particular table.
-    /// </summary>
-    /// <param name="key">The key.</param>
-    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
-    /// <param name="storeObject">The identifier of the containing store object.</param>
-    public static void SetName(this IMutableKey key, string? name, in StoreObjectIdentifier storeObject)
-        => RelationalKeyOverrides
-            .GetOrCreate(key, storeObject, ConfigurationSource.Explicit)
-            .SetName(Check.NullButNotEmpty(name), ConfigurationSource.Explicit);
-
-    /// <summary>
-    ///     Sets the key constraint name for this key for a particular table.
-    /// </summary>
-    /// <param name="key">The key.</param>
-    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
-    /// <param name="storeObject">The identifier of the containing store object.</param>
-    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
-    /// <returns>The configured name.</returns>
-    public static string? SetName(
-        this IConventionKey key,
-        string? name,
-        in StoreObjectIdentifier storeObject,
-        bool fromDataAnnotation = false)
-    {
-        var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
-
-        return RelationalKeyOverrides
-            .GetOrCreate((IMutableKey)key, storeObject, configurationSource)
-            .SetName(Check.NullButNotEmpty(name), configurationSource);
-    }
-
-    /// <summary>
-    ///     Gets the <see cref="ConfigurationSource" /> for the key constraint name for a particular table.
-    /// </summary>
-    /// <param name="key">The key.</param>
-    /// <param name="storeObject">The identifier of the containing store object.</param>
-    /// <returns>The <see cref="ConfigurationSource" /> for the constraint name.</returns>
-    public static ConfigurationSource? GetNameConfigurationSource(
-        this IConventionKey key,
-        in StoreObjectIdentifier storeObject)
-        => (RelationalKeyOverrides.Find(key, storeObject) as IConventionRelationalKeyOverrides)
-            ?.GetNameConfigurationSource();
-
-    /// <summary>
-    ///     Returns all per-store-object constraint name overrides configured for this key.
-    /// </summary>
-    /// <param name="key">The key.</param>
-    /// <returns>The overrides.</returns>
-    public static IEnumerable<IReadOnlyRelationalKeyOverrides> GetOverrides(this IReadOnlyKey key)
-        => RelationalKeyOverrides.Get(key) ?? [];
-
-    /// <summary>
-    ///     Removes the per-store-object constraint name override for the given store object.
-    /// </summary>
-    /// <param name="key">The key.</param>
-    /// <param name="storeObject">The identifier of the containing store object.</param>
-    /// <returns>The removed override, or <see langword="null" /> if none was configured.</returns>
-    public static IMutableRelationalKeyOverrides? RemoveOverrides(
-        this IMutableKey key,
-        in StoreObjectIdentifier storeObject)
-        => RelationalKeyOverrides.Remove(key, storeObject);
-```
-
-Add the FK equivalents listed in this task's **Interfaces** block to `RelationalForeignKeyExtensions.cs`, each constructing the `StoreObjectPair` from its two store-object parameters.
-
-- [ ] **Step 4: Add the fluent builder overloads**
-
-To `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`:
-
-```csharp
-    /// <summary>
-    ///     Configures the name of the key constraint in the database for a particular table.
-    /// </summary>
-    /// <remarks>
-    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
-    /// </remarks>
-    /// <param name="keyBuilder">The builder for the key being configured.</param>
-    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
-    /// <param name="storeObject">The identifier of the table.</param>
-    /// <returns>A builder to further configure the key.</returns>
-    public static KeyBuilder HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)
-    {
-        Check.NullButNotEmpty(name);
-
-        keyBuilder.Metadata.SetName(name, storeObject);
-
-        return keyBuilder;
-    }
-
-    /// <summary>
-    ///     Configures the name of the key constraint in the database for a particular table.
-    /// </summary>
-    /// <remarks>
-    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
-    /// </remarks>
-    /// <typeparam name="TEntity">The entity type being configured.</typeparam>
-    /// <param name="keyBuilder">The builder for the key being configured.</param>
-    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
-    /// <param name="storeObject">The identifier of the table.</param>
-    /// <returns>A builder to further configure the key.</returns>
-    public static KeyBuilder<TEntity> HasName<TEntity>(
-        this KeyBuilder<TEntity> keyBuilder,
-        string? name,
-        in StoreObjectIdentifier storeObject)
-        => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name, storeObject);
-```
-
-Add the convention-builder members to `IConventionKeyBuilder` and its implementation, following the existing `HasName(string?, bool)` pair on that interface. `CanSetName(name, storeObject, fromDataAnnotation)` must compare against `GetNameConfigurationSource(storeObject)` — this is the seam NamingConventions calls, so it has to respect explicit user configuration.
-
-- [ ] **Step 5: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/EFCore.Relational/
-git commit -m "Add public and convention APIs for per-store-object constraint names
-
-Task B6. HasName(name, storeObject) on the key builder and the pair-taking FK
-equivalent, plus the convention-builder seam naming conventions consume."
-```
-
----
-### Task B7: Runtime model conversion
-
-Spec §4 checklist, "runtime-model (compiled model) generation". `RelationalRuntimeModelConvention` converts the property-overrides annotation into `RuntimeRelationalPropertyOverrides` (`:404–432`); both new families need the same treatment or compiled models resolve the wrong constraint names.
-
-**Files:**
-- Create: `src/EFCore.Relational/Metadata/RuntimeRelationalKeyOverrides.cs`, `RuntimeRelationalForeignKeyOverrides.cs`
-- Modify: `src/EFCore.Relational/Metadata/Conventions/RelationalRuntimeModelConvention.cs`
-- Test: `test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs`
-
-**Interfaces:**
-- Consumes: Tasks B1 and B3.
-- Produces:
-  - `RuntimeRelationalKeyOverrides(IKey key, in StoreObjectIdentifier storeObject, bool isNameOverridden, string? name)`
-  - `RuntimeRelationalForeignKeyOverrides(IForeignKey foreignKey, in StoreObjectPair storeObjects, bool isNameOverridden, string? name)`
-  - `protected virtual void RelationalRuntimeModelConvention.ProcessKeyOverridesAnnotations(...)` and `ProcessForeignKeyOverridesAnnotations(...)`
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs`, in the style of that file's existing tests:
-
-```csharp
-[ConditionalFact]
-public virtual Task Per_store_object_constraint_names_survive_the_compiled_model()
-    => Test(
-        modelBuilder => modelBuilder.Entity<Customer>(b =>
-        {
-            b.ToTable("Customers");
-            b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-            b.HasKey(c => c.Id)
-                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
-                .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
-        }),
-        model =>
-        {
-            var key = model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
-            Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers")));
-            Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails")));
-        });
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: FAIL — the compiled model resolves the default names because the override annotation was dropped or left in its design-time form.
-
-- [ ] **Step 3: Create the runtime types**
-
-Copy `src/EFCore.Relational/Metadata/RuntimeRelationalPropertyOverrides.cs` twice, applying the Task B1 and Task B3 substitution tables. These are immutable read-side types — constructor-assigned properties, no configuration sources.
-
-- [ ] **Step 4: Add the conversions**
-
-In `RelationalRuntimeModelConvention`, alongside the property-overrides block at `:404`, add equivalents in `ProcessKeyAnnotations` and `ProcessForeignKeyAnnotations`:
-
-```csharp
-            if (annotations.TryGetValue(RelationalAnnotationNames.KeyOverrides, out var keyOverrides)
-                && keyOverrides != null)
-            {
-                var overridesByStoreObject = (IReadOnlyStoreObjectDictionary<IRelationalKeyOverrides>)keyOverrides;
-                var runtimeOverridesByStoreObject = new StoreObjectDictionary<RuntimeRelationalKeyOverrides>();
-                foreach (var overrides in overridesByStoreObject.GetValues())
-                {
-                    var runtimeOverrides = Create(overrides, runtimeKey);
-                    runtimeOverridesByStoreObject.Add(overrides.StoreObject, runtimeOverrides);
-
-                    CreateAnnotations(
-                        overrides, runtimeOverrides,
-                        static (convention, annotations, source, target, runtime)
-                            => convention.ProcessKeyOverridesAnnotations(annotations, source, target, runtime));
-                }
-
-                annotations[RelationalAnnotationNames.KeyOverrides] = runtimeOverridesByStoreObject;
-            }
-
-    private static RuntimeRelationalKeyOverrides Create(IRelationalKeyOverrides overrides, RuntimeKey runtimeKey)
-        => new(runtimeKey, overrides.StoreObject, overrides.IsNameOverridden, overrides.Name);
-```
-
-Write the FK block the same way over `StoreObjectPairDictionary<RuntimeRelationalForeignKeyOverrides>` and `overrides.StoreObjects`.
-
-If `ProcessKeyAnnotations` / `ProcessForeignKeyAnnotations` do not exist on this convention, add them following the shape of `ProcessPropertyAnnotations` — grep the file for `ProcessPropertyAnnotations` and mirror its signature and dispatch.
-
-- [ ] **Step 5: Handle the CSharp runtime annotation code generator**
-
-`RelationalCSharpRuntimeAnnotationCodeGenerator` emits code for `RelationalOverrides`; grep it for `RelationalOverrides` and add the two new annotation names to the same handling, or compiled-model *code generation* (as opposed to the in-memory runtime model) will emit an unusable annotation literal. The test in Step 1 exercises the code-generation path if `Test(...)` compiles the generated model — check what the base `Test` helper does and, if it only builds in memory, add a second test that goes through code generation.
-
-- [ ] **Step 6: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/EFCore.Relational/Metadata/
-git commit -m "Convert key and FK overrides into the runtime model
-
-Task B7. Compiled models resolve per-store-object constraint names."
-```
-
----
-
-### Task B8: Snapshot generation and debug output
-
-Spec §4 checklist, "snapshot generation" and "debug/`ToDebugString` surfacing". `CSharpSnapshotGenerator.GeneratePropertyOverrides` (`:1600–1646`) emits property overrides as store-object-scoped fluent calls; keys and FKs need equivalents, and the fluent surface from Task B6 is what they emit.
-
-Without this, `dotnet ef migrations add` drops the overrides from the snapshot and the next migration regenerates every constraint with its default name.
-
-**Files:**
-- Modify: `src/EFCore.Design/Migrations/Design/CSharpSnapshotGenerator.cs`
-- Modify: `src/EFCore.Relational/Design/AnnotationCodeGenerator.cs`
-- Modify: `src/EFCore.Relational/Metadata/Internal/RelationalKeyOverrides.cs`, `RelationalForeignKeyOverrides.cs` (debug strings)
-- Test: `test/EFCore.Design.Tests/Migrations/Design/CSharpMigrationsGeneratorTest.cs` (or the snapshot-generator test file in that project)
-
-**Interfaces:**
-- Consumes: the fluent API from Task B6.
-- Produces: `protected virtual void CSharpSnapshotGenerator.GenerateKeyOverrides(string keyBuilderName, IKey key, IndentedStringBuilder stringBuilder)` and the FK equivalent.
-
-- [ ] **Step 1: Write the failing test**
-
-```csharp
-[ConditionalFact]
-public void Snapshot_emits_per_store_object_key_constraint_names()
-{
-    var modelBuilder = CreateConventionalModelBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-        b.HasKey(c => c.Id)
-            .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
-            .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
-    });
-
-    var code = GenerateSnapshotCode(modelBuilder.FinalizeModel());
-
-    Assert.Contains("\"pk_customers\"", code);
-    Assert.Contains("\"pk_customer_details\"", code);
-    Assert.DoesNotContain("HasAnnotation(\"Relational:KeyOverrides\"", code);
-}
-```
-
-Use the file's existing snapshot-generation helper in place of `GenerateSnapshotCode`.
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj`
-Expected: FAIL — the names are missing entirely, or emitted as a raw annotation.
-
-- [ ] **Step 3: Register the annotation names as handled**
-
-In `src/EFCore.Relational/Design/AnnotationCodeGenerator.cs`, find where `RelationalAnnotationNames.RelationalOverrides` is registered for handling and add `KeyOverrides` and `ForeignKeyOverrides` alongside it. Without this, the raw annotation is emitted *in addition to* the fluent calls.
-
-- [ ] **Step 4: Emit the fluent calls**
-
-In `CSharpSnapshotGenerator`, add a method modeled on `GeneratePropertyOverrides` (`:1600`):
-
-```csharp
-    /// <summary>
-    ///     Generates code for per-store-object key constraint name overrides.
-    /// </summary>
-    /// <param name="keyBuilderName">The name of the builder variable.</param>
-    /// <param name="key">The key.</param>
-    /// <param name="stringBuilder">The builder code is added to.</param>
-    protected virtual void GenerateKeyOverrides(
-        string keyBuilderName,
-        IKey key,
-        IndentedStringBuilder stringBuilder)
-    {
-        foreach (var overrides in key.GetOverrides())
-        {
-            if (!overrides.IsNameOverridden)
-            {
-                continue;
-            }
-
-            stringBuilder
-                .AppendLine()
-                .Append(keyBuilderName)
-                .Append(".HasName(")
-                .Append(Code.UnknownLiteral(overrides.Name))
-                .Append(", ")
-                .Append(Code.UnknownLiteral(overrides.StoreObject))
-                .AppendLine(");");
-        }
-    }
-```
-
-`Code.UnknownLiteral(StoreObjectIdentifier)` may not have a literal generator. Check `ICSharpHelper` for `StoreObjectIdentifier` support; if there is none, emit the constructor call explicitly:
-
-```csharp
-                .Append("StoreObjectIdentifier.Table(")
-                .Append(Code.Literal(overrides.StoreObject.Name))
-                .Append(", ")
-                .Append(Code.Literal(overrides.StoreObject.Schema))
-                .Append(")")
-```
-
-Call `GenerateKeyOverrides` from wherever the generator emits key configuration (grep for `HasName` in the file to find the existing key-name emission and add the call directly after it). Write the FK equivalent, emitting both store objects.
-
-- [ ] **Step 5: Add debug strings**
-
-Both override classes already inherit the `ToString()` / `DebugView` shape from the Task B1 copy. Confirm `ToDebugString` produces something readable — `StoreObjectPair.ToString()` from Task B3 gives `UserLockout -> Users`, which is what an FK override should show.
-
-- [ ] **Step 6: Run the tests to verify they pass**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/EFCore.Design/ src/EFCore.Relational/
-git commit -m "Emit per-store-object constraint names into snapshots
-
-Task B8. Overrides round-trip through migrations add instead of silently
-reverting to default constraint names."
-```
-
----
-
-### Task B9: Differ, shared constraints, and the NamingConventions end-to-end
-
-Two remaining spec §4 checklist items — "shared-constraint/root-FK behavior when constraints are deduplicated across tables" — plus the proof that the whole thing solves the problem it was built for.
-
-**Spike 2 flagged shared-constraint deduplication as undesigned.** Decide it here: when two entity types share a table and their FKs collapse into one constraint, and the two carry *conflicting* overrides for the same `(dependent, principal)` pair, that is a model error, not a silent last-writer-wins. Add a validation error rather than picking a winner.
-
-**Files:**
-- Modify: `src/EFCore.Relational/Infrastructure/RelationalModelValidator.cs`
-- Modify: `src/EFCore.Relational/Properties/RelationalStrings.resx` + `.Designer.cs`
-- Test: `test/EFCore.Relational.Tests/Migrations/Internal/MigrationsModelDifferTest.cs`
-- Test: `test/EFCore.Relational.Tests/Metadata/RelationalForeignKeyOverridesTest.cs`
-
-**Interfaces:**
-- Consumes: all of Phase B so far.
-- Produces: `RelationalStrings.DuplicateConstraintNameOverride(table, constraintName, otherConstraintName)`.
-
-- [ ] **Step 1: Write the failing differ test**
-
-```csharp
-[ConditionalFact]
-public void Per_table_constraint_names_reach_migration_operations()
-{
-    Execute(
-        _ => { },
-        target => target.Entity<Customer>(b =>
-        {
-            b.ToTable("Customers");
-            b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-            b.HasKey(c => c.Id)
-                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
-                .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
-        }),
-        operations =>
-        {
-            var createTables = operations.OfType<CreateTableOperation>().ToList();
-
-            Assert.Equal(
-                "pk_customers",
-                createTables.Single(o => o.Name == "Customers").PrimaryKey!.Name);
-            Assert.Equal(
-                "pk_customer_details",
-                createTables.Single(o => o.Name == "CustomerDetails").PrimaryKey!.Name);
-        });
-}
-```
-
-Match the file's actual `Execute(...)` overload shape — it differs between the source/target-only and three-argument forms.
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS already, in fact — Spike 2 finding 2 predicts the differ consumes the resolvers for free. **If it passes on the first run, keep the test**: it is the regression guard for that prediction. If it fails, the relational-model assumption has broken and must be fixed before continuing.
-
-- [ ] **Step 3: Write the failing shared-constraint conflict test**
-
-```csharp
-[ConditionalFact]
-public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-
-    // Two entity types sharing a table, each with a matching FK that deduplicates to one constraint.
-    modelBuilder.Entity<Order>(b =>
-    {
-        b.ToTable("Orders");
-        b.HasOne<Customer>().WithMany().HasForeignKey(o => o.CustomerId);
-    });
-    modelBuilder.Entity<OrderDetails>(b =>
-    {
-        b.ToTable("Orders");
-        b.HasOne<Customer>().WithMany().HasForeignKey(o => o.CustomerId);
-    });
-    modelBuilder.Entity<Customer>().ToTable("Customers");
-
-    var orders = StoreObjectIdentifier.Table("Orders");
-    var customers = StoreObjectIdentifier.Table("Customers");
-
-    foreach (var (entityClrType, name) in new[] { (typeof(Order), "fk_a"), (typeof(OrderDetails), "fk_b") })
-    {
-        var foreignKey = (IMutableForeignKey)modelBuilder.Model.FindEntityType(entityClrType)!
-            .GetForeignKeys().Single();
-        foreignKey.SetConstraintName(name, orders, customers);
-    }
-
-    Assert.Contains(
-        "fk_a",
-        Assert.Throws<InvalidOperationException>(() => modelBuilder.FinalizeModel()).Message);
-}
-```
-
-- [ ] **Step 4: Add the validation and its string**
-
-`.resx`:
-
-```xml
-  <data name="DuplicateConstraintNameOverride" xml:space="preserve">
-    <value>Entity types sharing table '{table}' configure conflicting constraint names '{constraintName}' and '{otherConstraintName}' for the same database constraint. Constraints shared across entity types must be configured with the same name.</value>
-  </data>
-```
-
-`.Designer.cs`:
-
-```csharp
-        /// <summary>
-        ///     Entity types sharing table '{table}' configure conflicting constraint names '{constraintName}' and '{otherConstraintName}' for the same database constraint. Constraints shared across entity types must be configured with the same name.
-        /// </summary>
-        public static string DuplicateConstraintNameOverride(object? table, object? constraintName, object? otherConstraintName)
-            => string.Format(
-                GetString("DuplicateConstraintNameOverride", nameof(table), nameof(constraintName), nameof(otherConstraintName)),
-                table, constraintName, otherConstraintName);
-```
-
-Add the check inside `RelationalModelValidator.ValidateSharedForeignKeysCompatibility` (grep for it — it already walks the FKs that deduplicate onto one constraint) comparing `GetConstraintName(storeObject, principalStoreObject)` across the sharing set and throwing on disagreement.
-
-- [ ] **Step 5: Write the NamingConventions-shaped end-to-end test**
-
-This is the acceptance test for the whole workstream — the shape that PR #396 had to work around by *deleting* names:
-
-```csharp
-[ConditionalFact]
-public void Rewriting_constraint_names_per_store_object_produces_no_collisions()
-{
-    var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<User>(b =>
-    {
-        b.ToTable("users");
-        b.SplitToTable("user_lockout", s => s.Property(u => u.PasswordHash));
-        b.SplitToTable("user_profile", s => s.Property(u => u.DisplayName));
-    });
-
-    var entityType = modelBuilder.Model.FindEntityType(typeof(User))!;
-    var key = (IMutableKey)entityType.FindPrimaryKey()!;
-    var linkingForeignKey = (IMutableForeignKey)entityType.GetForeignKeys()
-        .Single(fk => fk.PrincipalEntityType == entityType);
-
-    var users = StoreObjectIdentifier.Table("users");
-    var lockout = StoreObjectIdentifier.Table("user_lockout");
-    var profile = StoreObjectIdentifier.Table("user_profile");
-
-    // What a naming convention does: rewrite per store object instead of writing one global name.
-    foreach (var table in new[] { users, lockout, profile })
-    {
-        key.SetName("pk_" + table.Name, table);
-    }
-
-    linkingForeignKey.SetConstraintName("fk_user_lockout_users_id", lockout, users);
-    linkingForeignKey.SetConstraintName("fk_user_profile_users_id", profile, users);
-
-    var relationalModel = modelBuilder.FinalizeModel().GetRelationalModel();
-
-    var constraintNames = relationalModel.Tables
-        .SelectMany(t => t.UniqueConstraints.Select(c => c.Name)
-            .Concat(t.ForeignKeyConstraints.Select(c => c.Name)))
-        .ToList();
-
-    // The #396 symptom was two identically named constraints; there must be none now.
-    Assert.Equal(constraintNames.Count, constraintNames.Distinct().Count());
-    Assert.Contains("pk_user_lockout", constraintNames);
-    Assert.Contains("fk_user_profile_users_id", constraintNames);
-}
-```
-
-- [ ] **Step 6: Run everything**
-
-```bash
-./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj
-./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj
-```
-
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/EFCore.Relational/ test/EFCore.Relational.Tests/
-git commit -m "Reject conflicting overrides on deduplicated constraints; prove the naming case
-
-Task B9. Differ carries per-table names into migration operations, and the
-EFCore.NamingConventions #396 collision shape now resolves collision-free."
-```
-
----
-
-### Task B10: Baseline, provider sweep, and PR
-
-**Files:**
-- Modify: `src/EFCore.Relational/EFCore.Relational.baseline.json`
-
-**Interfaces:**
-- Consumes: all of Phase B.
-- Produces: the PR.
-
-- [ ] **Step 1: Update the API baseline**
-
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj --filter-class '*RelationalApiConsistencyTest'`
-
-Copy the canonical member strings from the failure output into `src/EFCore.Relational/EFCore.Relational.baseline.json`. Expect entries for: `StoreObjectPair`, `StoreObjectPairDictionary<T>`, `IReadOnlyStoreObjectPairDictionary<T>`, the eight override interfaces, the two runtime override types, the two conventions, and the new members on `RelationalKeyExtensions`, `RelationalForeignKeyExtensions`, `RelationalKeyBuilderExtensions`, `RelationalForeignKeyBuilderExtensions`, `IConventionKeyBuilder`, and `IConventionForeignKeyBuilder`.
-
-Re-run until green.
-
-- [ ] **Step 2: Sweep every provider**
-
-The change is in `EFCore.Relational`, so every provider inherits it.
-
-```bash
-./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj
-./build.sh --test --projects $PWD/test/EFCore.Sqlite.FunctionalTests/EFCore.Sqlite.FunctionalTests.csproj
-./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj
-./build.sh --test --projects $PWD/test/EFCore.Design.Tests/EFCore.Design.Tests.csproj
-```
-
-Expected: PASS. Record actual counts.
-
-- [ ] **Step 3: Open the PR**
-
-```bash
-git push -u origin feature/per-store-object-constraint-names
-gh pr create --repo dotnet/efcore --base main \
-  --title "Support per-store-object key and foreign key constraint names" \
-  --body-file <(cat <<'BODY'
-Addresses #27972 and #27971.
-
-Key overrides are keyed by a single store object; foreign key overrides are
-keyed by the (dependent, principal) store-object pair, because one model
-foreign key serves every entity-splitting fragment's linking constraint.
-
-Unblocks efcore/EFCore.NamingConventions#396, which currently has to remove
-rewritten names for fragment-bearing entities rather than rewrite them per
-table.
-
-## Metadata checklist
-
-Global-name fallback precedence, explicit-null semantics (an override set to null
-suppresses a global rewritten name down to the default), shared-constraint conflict
-handling, `Attach`/`MergeInto` on key and FK re-creation, convention-versus-explicit
-configuration sources, runtime-model generation, snapshot generation, and debug output
-are all covered — see the tests in `RelationalKeyOverridesTest` and
-`RelationalForeignKeyOverridesTest`.
-
-Conflicting overrides on a constraint that deduplicates across table-sharing entity
-types are a validation error rather than last-writer-wins.
-
-## Left open
-
-- TPT root-FK behaviour.
-- View and function store-object types: the resolvers early-return for non-table store
-  objects today, and the overrides inherit that.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-BODY
-)
-```
-
-State explicitly in the body which spec §4 checklist items are covered and which are deliberately left open (TPT root-FK behaviour; view and function store-object types, which the resolvers early-return today and the overrides therefore inherit).
-
-- [ ] **Step 4: Commit the baseline**
-
-```bash
-git add src/EFCore.Relational/EFCore.Relational.baseline.json
-git commit -m "Baseline the per-store-object constraint name API
-
-Task B10."
 ```
 
 ---
