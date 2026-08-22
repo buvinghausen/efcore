@@ -1008,8 +1008,10 @@ Note the difference from `PropertyOverridesConvention`: that convention early-re
 `InternalKeyBuilder.Attach` has three direct call sites, but one of them is a **fan-out point, not a leaf** — `PropertiesSnapshot.Attach` is itself invoked from several builders, so the audit has to run transitively to the outermost caller in each chain. Enumerate, do not assume:
 
 ```bash
-grep -rn "internalKeyBuilder.Attach\|detachedProperties.\?.Attach\|Snapshot.Attach\|detachedRelationship.Attach" src/EFCore/Metadata/Internal/
+grep -rn "\.Attach(" src/EFCore/Metadata/Internal/
 ```
+
+Search for the call, not for the variable names — detached snapshots are sometimes attached straight off the expression that produced them (`DetachRelationship(referencingForeignKey).Attach()`), so any pattern keyed on a receiver name silently misses those.
 
 | Chain | Status |
 |---|---|
@@ -1022,9 +1024,18 @@ grep -rn "internalKeyBuilder.Attach\|detachedProperties.\?.Attach\|Snapshot.Atta
 | `ComplexPropertySnapshot.cs:172` → `PropertiesSnapshot.Attach:114` | verify — transitively, via its own callers |
 | `InternalForeignKeyBuilder.cs:1596` → `InternalKeyBuilder.Attach` | verify |
 
-The foreign-key side needs the same treatment against `RelationshipSnapshot.Attach`, whose known call sites are `InternalEntityTypeBuilder.cs:356`, `InternalEntityTypeBuilder.cs:1722`, `InternalForeignKeyBuilder.cs:1604`, and `PropertiesSnapshot.cs:135` — the last of which inherits every chain in the table above.
+The foreign-key side needs the same treatment against `RelationshipSnapshot.Attach`:
 
-Confirm each row marked `verify` by reading outward from the call to the nearest `DelayConventions()`; a chain is only clear when the batch encloses the *whole* detach-and-reattach sequence, not merely the attach. Two chains are already confirmed above and no counterexample has been found, so the expected outcome is that the convention design stands — but the check is cheap and a single non-delayed path would make the survival behaviour silently order-dependent. **If any path turns out not to be delayed**, do not weaken the test: move the re-attach out of the convention and into `InternalKeyBuilder.Attach` itself, immediately after `MergeAnnotationsFrom`. That costs a relational hook in a Core file, so prefer the convention if the audit clears — and record which way it went in the commit message, because the same question decides the FK path.
+| Chain | Status |
+|---|---|
+| `InternalEntityTypeBuilder.cs:132` (`PrimaryKey`, via `DetachRelationship(...).Attach()`) | delayed — batch opens at `InternalEntityTypeBuilder.cs:100` |
+| `InternalTypeBaseBuilder.cs:1421` (property removal) | delayed — batch opens at `InternalTypeBaseBuilder.cs:1393` |
+| `InternalEntityTypeBuilder.cs:356` | verify |
+| `InternalEntityTypeBuilder.cs:1722` | verify |
+| `InternalForeignKeyBuilder.cs:1604` | verify |
+| `PropertiesSnapshot.cs:135` | verify — inherits every chain in the table above |
+
+Confirm each row marked `verify` by reading outward from the call to the nearest `DelayConventions()`; a chain is only clear when the batch encloses the *whole* detach-and-reattach sequence, not merely the attach. Four chains are already confirmed delayed above and no counterexample has been found across two review passes, so the expected outcome is that the convention design stands — but the check is cheap, and a single non-delayed path would make the survival behaviour silently order-dependent. **If any path turns out not to be delayed**, do not weaken the test: move the re-attach out of the convention and into `InternalKeyBuilder.Attach` itself, immediately after `MergeAnnotationsFrom`. That costs a relational hook in a Core file, so prefer the convention if the audit clears — and record which way it went in the commit message, because the same question decides the FK path.
 
 Write `ForeignKeyOverridesConvention` the same way over `IForeignKeyAddedConvention` and `StoreObjects`.
 
@@ -4633,7 +4644,9 @@ Assert the "identically" half of the spec's requirement directly:
     }
 ```
 
-And prove the default-no-tracking behaviour on a **control entity that actually materializes** — `Login` is temporal and unsplit, so it survives the rejection path and reaches the change tracker. A scalar projection like `Select(u => u.Email)` tracks nothing under any tracking mode, so asserting `Assert.Empty(ChangeTracker.Entries())` over one proves nothing at all:
+And prove the default-no-tracking behaviour on a **control entity that actually materializes** — `Login` is temporal and unsplit, so it survives the rejection path and reaches the change tracker. A scalar projection like `Select(u => u.Email)` tracks nothing under any tracking mode, so asserting `Assert.Empty(ChangeTracker.Entries())` over one proves nothing at all.
+
+Two more things it needs to be a real test: **rows, and a query that can see them.**
 
 ```csharp
     [ConditionalFact]
@@ -4641,15 +4654,41 @@ And prove the default-no-tracking behaviour on a **control entity that actually 
     {
         await using var context = fixture.CreateContext();
 
-        _ = await context.Logins.TemporalAsOf(PointInTime).ToListAsync();
+        // TemporalAll spans current and history rows, so it sees the seeded Login whenever the
+        // store happens to have been created. TemporalAsOf(PointInTime) would not: PointInTime is
+        // a fixed 2024 instant, always in the past relative to a store created during the run, so
+        // it returns nothing — the Empty assertion would pass vacuously and the NotEmpty one would
+        // fail even against a correctly working AsTracking().
+        var logins = await context.Logins.TemporalAll().ToListAsync();
+        Assert.NotEmpty(logins);
         Assert.Empty(context.ChangeTracker.Entries());
 
-        _ = await context.Logins.TemporalAsOf(PointInTime).AsTracking().ToListAsync();
+        context.ChangeTracker.Clear();
+
+        _ = await context.Logins.TemporalAll().AsTracking().ToListAsync();
         Assert.NotEmpty(context.ChangeTracker.Entries());
     }
 ```
 
-Both of these depend on the `Login` type and its `DbSet` added in Step 4 — either place them there or add `public DbSet<Login> Logins => Set<Login>();` to the fixture context in Step 1 and keep them here. If the second test's `NotEmpty` assertion fails, the temporal API prevents a later `AsTracking()` override after all; that is a finding worth reporting upstream, not a reason to delete the assertion.
+The `Assert.NotEmpty(logins)` line is the guard that keeps this test honest — without it, an empty result set makes both tracking assertions meaningless.
+
+These depend on three additions from Step 4, so place them there or move the additions forward to Step 1:
+
+- the `Login` type and its mapping;
+- `public DbSet<Login> Logins => Set<Login>();` on `TemporalSplitEntityContext`;
+- a fixture seed, since `SharedStoreFixtureBase<TContext>` seeds nothing by default (`test/EFCore.Specification.Tests/SharedStoreFixtureBase.cs:103`):
+
+```csharp
+    protected override async Task SeedAsync(TemporalSplitEntityContext context)
+    {
+        context.Logins.Add(new Login { At = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc) });
+        await context.SaveChangesAsync();
+    }
+```
+
+If the second `NotEmpty` fails against a seeded, non-empty result, the temporal API really does prevent a later `AsTracking()` override; that is a finding worth reporting upstream, not a reason to delete the assertion.
+
+Note that none of the other tests in this task need seeded data — they assert generated SQL or expect a translation-time throw, so they run correctly against an empty store. Do not add result assertions to them without seeding first.
 
 Also run the rejection path across all five operators, not just `AsOf`, to prove the guided error is not operator-specific:
 
@@ -5056,3 +5095,16 @@ Fixed: `tracking` restored as an `AsTracking()` arm alongside `materialization`;
 **2. B9 — the structural dictionary key was not injective (medium).** The first fix keyed the structural bucket on `string.Join(",", columnNames)`. That collides: one column named `A,B` encodes identically to two columns `A` and `B`, on either side of the constraint, so a single-column and a composite foreign key could bucket together and raise a spurious conflict. `DisplayName()` on the principal store object had the same flattening problem. Fixed with a `ConstraintStructure` class comparing sequences directly and hashing element counts alongside elements, keyed on the `StoreObjectIdentifier` value rather than its display string.
 
 **3. B5 — the audit inventory was incomplete (low).** Step 4b listed "three call sites", but `PropertiesSnapshot.Attach` is a fan-out point reached from at least `InternalModelBuilder.cs:263`, `InternalTypeBaseBuilder.cs:310`, `InternalComplexTypeBuilder.cs:317`, `InternalEntityTypeBuilder.cs:1687`, `InternalForeignKeyBuilder.cs:2922`, and `ComplexPropertySnapshot.cs:172`. Fixed: the step now enumerates chains transitively, includes the parallel `RelationshipSnapshot.Attach` paths for foreign keys, and ships the grep that regenerates the list. Two chains are confirmed delayed (`InternalEntityTypeBuilder.cs:1397`, `InternalModelBuilder.cs:118`) and no counterexample has been found, so the convention design still stands — the remaining work is completing the audit, not redesigning.
+
+
+---
+
+## Review round 3 — 2026-08-22
+
+Two residual defects from the round-2 fixes; the `ConstraintStructure` comparer passed. Both held.
+
+**1. A12 — the tracking control test could not see any rows (medium).** The round-2 replacement queried `context.Logins.TemporalAsOf(PointInTime)` against a fixture that seeds nothing, with `PointInTime` fixed at 2024 — always before the store is created. Both queries return zero entities, so `Assert.Empty` passed vacuously and `Assert.NotEmpty` would fail even against a correctly working `AsTracking()`. Fixed: the fixture now seeds a `Login`, the control test queries `TemporalAll()` (robust against store-creation timing and clock precision in a way a fixed as-of instant is not), a `NotEmpty(logins)` guard keeps the tracking assertions meaningful, and the tracker is cleared between the two queries.
+
+**2. B5 — the foreign-key audit was still incomplete, and its grep could not regenerate the list (low).** Two survival paths were missing: `InternalEntityTypeBuilder.cs:132` (`DetachRelationship(referencingForeignKey).Attach()`) and `InternalTypeBaseBuilder.cs:1421`. Both are enclosed by delayed scopes — `:100` and `:1393` respectively — so they add two more confirmations rather than a counterexample. The grep missed the first because it keyed on receiver names (`detachedRelationship.Attach`) while that call attaches straight off the expression that produced the snapshot; it now searches `\.Attach(` and says why.
+
+Four chains are now confirmed delayed across three passes with no counterexample, which is the strongest evidence yet for the convention design — the remaining `verify` rows are completion, not doubt.
