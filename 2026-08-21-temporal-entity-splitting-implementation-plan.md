@@ -1005,15 +1005,26 @@ Note the difference from `PropertyOverridesConvention`: that convention early-re
 
 - [ ] **Step 4b: Audit the attach call sites before trusting the convention**
 
-Three call sites re-attach keys, and all three must sit inside a delay batch:
+`InternalKeyBuilder.Attach` has three direct call sites, but one of them is a **fan-out point, not a leaf** — `PropertiesSnapshot.Attach` is itself invoked from several builders, so the audit has to run transitively to the outermost caller in each chain. Enumerate, do not assume:
 
-| Call site | Enclosing batch |
+```bash
+grep -rn "internalKeyBuilder.Attach\|detachedProperties.\?.Attach\|Snapshot.Attach\|detachedRelationship.Attach" src/EFCore/Metadata/Internal/
+```
+
+| Chain | Status |
 |---|---|
-| `src/EFCore/Metadata/Internal/InternalEntityTypeBuilder.cs:1693` (`SetBaseType`) | `Metadata.Model.DelayConventions()` at `:1397` — confirmed |
-| `src/EFCore/Metadata/Internal/InternalForeignKeyBuilder.cs:1596` | verify |
-| `src/EFCore/Metadata/Internal/PropertiesSnapshot.cs:114` | verify — depends on the caller |
+| `InternalEntityTypeBuilder.cs:1693` (`SetBaseType`) → `InternalKeyBuilder.Attach` | delayed — batch opens at `InternalEntityTypeBuilder.cs:1397` |
+| `InternalModelBuilder.cs:263` → `PropertiesSnapshot.Attach:114` | delayed — `using var batch = Metadata.DelayConventions()` at `InternalModelBuilder.cs:118` |
+| `InternalEntityTypeBuilder.cs:1687` → `PropertiesSnapshot.Attach:114` | verify |
+| `InternalTypeBaseBuilder.cs:310` → `PropertiesSnapshot.Attach:114` | verify |
+| `InternalComplexTypeBuilder.cs:317` → `PropertiesSnapshot.Attach:114` | verify |
+| `InternalForeignKeyBuilder.cs:2922` → `PropertiesSnapshot.Attach:114` | verify |
+| `ComplexPropertySnapshot.cs:172` → `PropertiesSnapshot.Attach:114` | verify — transitively, via its own callers |
+| `InternalForeignKeyBuilder.cs:1596` → `InternalKeyBuilder.Attach` | verify |
 
-Confirm the two marked `verify` by reading outward from the call to the nearest `DelayConventions()`. Do the same for the FK-added path. **If any path turns out not to be delayed**, do not weaken the test: move the re-attach out of the convention and into `InternalKeyBuilder.Attach` itself, immediately after `MergeAnnotationsFrom`. That costs a relational hook in a Core file, so prefer the convention if the audit clears — and record which way it went in the commit message, because the same question decides the FK path.
+The foreign-key side needs the same treatment against `RelationshipSnapshot.Attach`, whose known call sites are `InternalEntityTypeBuilder.cs:356`, `InternalEntityTypeBuilder.cs:1722`, `InternalForeignKeyBuilder.cs:1604`, and `PropertiesSnapshot.cs:135` — the last of which inherits every chain in the table above.
+
+Confirm each row marked `verify` by reading outward from the call to the nearest `DelayConventions()`; a chain is only clear when the batch encloses the *whole* detach-and-reattach sequence, not merely the attach. Two chains are already confirmed above and no counterexample has been found, so the expected outcome is that the convention design stands — but the check is cheap and a single non-delayed path would make the survival behaviour silently order-dependent. **If any path turns out not to be delayed**, do not weaken the test: move the re-attach out of the convention and into `InternalKeyBuilder.Attach` itself, immediately after `MergeAnnotationsFrom`. That costs a relational hook in a Core file, so prefer the convention if the audit clears — and record which way it went in the commit message, because the same question decides the FK path.
 
 Write `ForeignKeyOverridesConvention` the same way over `IForeignKeyAddedConvention` and `StoreObjects`.
 
@@ -1662,7 +1673,7 @@ The grouping key has to be **structural**, not the resolved name — that is the
             return;
         }
 
-        var namesByStructure = new Dictionary<(string, string, string), (IForeignKey, string)>();
+        var namesByStructure = new Dictionary<ConstraintStructure, (IForeignKey ForeignKey, string Name)>();
 
         foreach (var foreignKey in mappedTypes.SelectMany(et => et.GetDeclaredForeignKeys()))
         {
@@ -1683,13 +1694,12 @@ The grouping key has to be **structural**, not the resolved name — that is the
             // Structural identity: the dependent columns in *this* table, the principal table, and
             // the principal key columns. Deliberately name-independent — bucketing by the resolved
             // name is exactly what makes ValidateSharedForeignKeysCompatibility blind to this case.
-            var dependentColumns = string.Join(
-                ",", foreignKey.Properties.Select(pr => pr.GetColumnName(table) ?? pr.Name));
-            var principalColumns = string.Join(
-                ",",
-                foreignKey.PrincipalKey.Properties.Select(
-                    pr => pr.GetColumnName(principalTable.Value) ?? pr.Name));
-            var structure = (dependentColumns, principalTable.Value.DisplayName(), principalColumns);
+            var structure = new ConstraintStructure(
+                foreignKey.Properties
+                    .Select(pr => pr.GetColumnName(table) ?? pr.Name).ToList(),
+                principalTable.Value,
+                foreignKey.PrincipalKey.Properties
+                    .Select(pr => pr.GetColumnName(principalTable.Value) ?? pr.Name).ToList());
 
             if (!namesByStructure.TryGetValue(structure, out var existing))
             {
@@ -1697,12 +1707,58 @@ The grouping key has to be **structural**, not the resolved name — that is the
                 continue;
             }
 
-            if (existing.Item2 != name)
+            if (existing.Name != name)
             {
                 throw new InvalidOperationException(
                     RelationalStrings.DuplicateConstraintNameOverride(
-                        table.DisplayName(), existing.Item2, name));
+                        table.DisplayName(), existing.Name, name));
             }
+        }
+    }
+
+    /// <summary>
+    ///     Name-independent identity of a foreign key constraint on one table: its dependent columns,
+    ///     the principal table, and the principal key columns.
+    /// </summary>
+    private sealed class ConstraintStructure(
+        IReadOnlyList<string> dependentColumns,
+        StoreObjectIdentifier principalTable,
+        IReadOnlyList<string> principalColumns)
+        : IEquatable<ConstraintStructure>
+    {
+        public IReadOnlyList<string> DependentColumns { get; } = dependentColumns;
+
+        public StoreObjectIdentifier PrincipalTable { get; } = principalTable;
+
+        public IReadOnlyList<string> PrincipalColumns { get; } = principalColumns;
+
+        public bool Equals(ConstraintStructure? other)
+            => other != null
+                && PrincipalTable == other.PrincipalTable
+                && DependentColumns.SequenceEqual(other.DependentColumns)
+                && PrincipalColumns.SequenceEqual(other.PrincipalColumns);
+
+        public override bool Equals(object? obj)
+            => Equals(obj as ConstraintStructure);
+
+        public override int GetHashCode()
+        {
+            var hashCode = new HashCode();
+            hashCode.Add(PrincipalTable);
+
+            hashCode.Add(DependentColumns.Count);
+            foreach (var column in DependentColumns)
+            {
+                hashCode.Add(column);
+            }
+
+            hashCode.Add(PrincipalColumns.Count);
+            foreach (var column in PrincipalColumns)
+            {
+                hashCode.Add(column);
+            }
+
+            return hashCode.ToHashCode();
         }
     }
 ```
@@ -1710,6 +1766,7 @@ The grouping key has to be **structural**, not the resolved name — that is the
 Two notes for the implementer:
 
 - Columns, not properties, are the right structural unit. Two entity types sharing a table map different property objects onto the same column, so comparing `IProperty` identity would put every sharing pair in its own bucket and the check would never fire.
+- **Do not serialize the column lists into a delimited string.** `string.Join(",", columnNames)` is not injective over legal identifiers: a single column named `A,B` encodes identically to the two columns `A` and `B`, on either side of the constraint, so two unrelated foreign keys — one single-column, one composite — would collide into the same bucket and raise a spurious conflicting-name error. `ConstraintStructure` above compares the sequences directly and hashes counts alongside elements. For the same reason the principal side keys on the `StoreObjectIdentifier` value, not on `DisplayName()`, which flattens name and schema into one string.
 - `GetColumnName(table)` can return `null` for a property not mapped to this table. Falling back to the property name (as above) keeps such a foreign key in a bucket of its own rather than colliding with an unrelated one; it never produces a false positive, only a missed one, which is the safe direction for a new error.
 
 - [ ] **Step 5: Write the NamingConventions-shaped end-to-end test**
@@ -4519,6 +4576,7 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
     [InlineData("ordering")]
     [InlineData("grouping")]
     [InlineData("materialization")]
+    [InlineData("tracking")]
     [InlineData("join")]
     [InlineData("correlated_subquery")]
     [InlineData("set_operation")]
@@ -4535,6 +4593,7 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
                 "ordering" => temporal.OrderBy(u => u.PasswordHash).Select(u => u.Email).ToListAsync(),
                 "grouping" => temporal.GroupBy(u => u.PasswordHash).Select(g => g.Key).ToListAsync(),
                 "materialization" => temporal.ToListAsync(),
+                "tracking" => temporal.AsTracking().ToListAsync(),
                 "join" => temporal
                     .Join(context.Users, o => o.Id, i => i.Id, (o, i) => o.PasswordHash)
                     .ToListAsync(),
@@ -4552,21 +4611,45 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
     }
 ```
 
-**There is no separate "tracking" arm, deliberately.** Every temporal operator applies `AsNoTracking()` to the query it returns (`src/EFCore.SqlServer/Extensions/SqlServerDbSetExtensions.cs:43` and the four siblings), so `temporal.ToListAsync()` and `temporal.AsNoTracking().ToListAsync()` are the same query — an earlier draft of this matrix listed both and tested one shape twice while reporting two. The `join` arm replaces it with a genuinely distinct shape: a fragment column referenced from the *outer* side of a join, where the fragment table has to survive pruning through a join tree rather than a flat select.
+**On the `materialization` and `tracking` arms.** Every temporal operator appends `AsNoTracking()` to the query it returns (`src/EFCore.SqlServer/Extensions/SqlServerDbSetExtensions.cs:43` and the four siblings), so `temporal.ToListAsync()` and `temporal.AsNoTracking().ToListAsync()` are literally the same query — writing both would test one shape twice while reporting two. The distinct second shape is `AsTracking()`, not `AsNoTracking()`: `QueryableMethodNormalizingExpressionVisitor.ExtractQueryMetadata` visits the inner queryable *first* and then sets `QueryTrackingBehavior.TrackAll` (`src/EFCore/Query/Internal/QueryableMethodNormalizingExpressionVisitor.cs:294`), so an outer `AsTracking()` overrides the operator's `AsNoTracking()` and produces a genuine tracking query. Spec §3.4 and §6 both call for tracking coverage explicitly ("full-entity materialization and tracking queries error identically"), and §7's spike gate lists "tracking vs. no-tracking".
 
-Add one non-matrix assertion recording the no-tracking behaviour explicitly, so the removal above is documented in code rather than only here:
+The `join` arm is an addition, not a replacement: a fragment column referenced from the *outer* side of a join, where the fragment table has to survive pruning through a join tree rather than a flat select.
+
+Assert the "identically" half of the spec's requirement directly:
 
 ```csharp
     [ConditionalFact]
-    public async Task Temporal_operators_never_track()
+    public async Task Tracking_and_no_tracking_materialization_fail_identically()
+    {
+        await using var context = fixture.CreateContext();
+        var temporal = context.Users.TemporalAsOf(PointInTime);
+
+        var noTracking = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => temporal.ToListAsync());
+        var tracking = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => temporal.AsTracking().ToListAsync());
+
+        Assert.Equal(noTracking.Message, tracking.Message);
+    }
+```
+
+And prove the default-no-tracking behaviour on a **control entity that actually materializes** — `Login` is temporal and unsplit, so it survives the rejection path and reaches the change tracker. A scalar projection like `Select(u => u.Email)` tracks nothing under any tracking mode, so asserting `Assert.Empty(ChangeTracker.Entries())` over one proves nothing at all:
+
+```csharp
+    [ConditionalFact]
+    public async Task Temporal_operators_default_to_no_tracking_and_AsTracking_overrides()
     {
         await using var context = fixture.CreateContext();
 
-        _ = await context.Users.TemporalAsOf(PointInTime).Select(u => u.Email).ToListAsync();
-
+        _ = await context.Logins.TemporalAsOf(PointInTime).ToListAsync();
         Assert.Empty(context.ChangeTracker.Entries());
+
+        _ = await context.Logins.TemporalAsOf(PointInTime).AsTracking().ToListAsync();
+        Assert.NotEmpty(context.ChangeTracker.Entries());
     }
 ```
+
+Both of these depend on the `Login` type and its `DbSet` added in Step 4 — either place them there or add `public DbSet<Login> Logins => Set<Login>();` to the fixture context in Step 1 and keep them here. If the second test's `NotEmpty` assertion fails, the temporal API prevents a later `AsTracking()` override after all; that is a finding worth reporting upstream, not a reason to delete the assertion.
 
 Also run the rejection path across all five operators, not just `AsOf`, to prove the guided error is not operator-specific:
 
@@ -4950,7 +5033,7 @@ An external review of the first draft raised ten findings against `main` at `296
 | 6 | A3/A5 | A5 promised hidden-state consensus and checked only column names; A3's `FindTemporalEntityType` claimed to prefer roots but returned the first qualifying mapping. Together: order-dependent migrations. | Hidden-state comparison, resource string and test added to A5; A3 given an explicit root-then-ordinal-name preference. |
 | 7 | B8 | Asserted `Contains` on generated text — no compile, no rebuild, no diff — for a newly invented `StoreObjectPair` literal. | Switched to `CSharpMigrationsGeneratorTestBase.Test` (`:37`), which compiles the snapshot and asserts an empty diff; explicit-null case added. |
 | 8 | B7 | Ran `EFCore.Relational.Tests`, which has no concrete `CompiledModelRelationalTestBase` subclass, so the test would never execute. | Runs `CompiledModelSqlServerTest` and `CompiledModelSqliteTest`; a zero-executed count is now called out as the failure mode to watch. |
-| 9 | A12 | Covered two of five temporal operators; the "materialization" and "tracking" arms were the same query, since every operator applies `AsNoTracking()` (`SqlServerDbSetExtensions.cs:43`); both `Include` tests projected, which discards the `Include`. | All five operators covered (success and rejection); `tracking` replaced by a `join` shape plus an explicit no-tracking assertion; `Include` and navigation-projection tests separated. |
+| 9 | A12 | Covered two of five temporal operators; the "materialization" and "tracking" arms were the same query, since every operator applies `AsNoTracking()` (`SqlServerDbSetExtensions.cs:43`); both `Include` tests projected, which discards the `Include`. | All five operators covered (success and rejection); `Include` and navigation-projection tests separated; a `join` shape added. The tracking arm was first deleted and then restored correctly — see round 2. |
 | 10 | A8/A13 | A8 called a snapshot-vs-runtime diff "compiled model diffing"; A13 said "exactly nine members" then listed eight. | Both corrected, with A13 now tying the count to the entries it actually adds. |
 
 **Half right — finding 2 (B5).** The reported test defect is real and fixed: repeating `HasKey(c => c.Id)` returns the existing key (`InternalEntityTypeBuilder.cs:267`, `:325`), so the survival test could pass with no machinery at all. It now forces a real re-creation via base-type assignment.
@@ -4958,3 +5041,18 @@ An external review of the first draft raised ten findings against `main` at `296
 The accompanying claim — that `IKeyAddedConvention` cannot work because `Attach` merges annotations *after* creating the key — does not hold, and the proposed redesign around annotation-changed processing was not adopted. `InternalPropertyBuilder.Attach` (`:828`) has the identical create-then-merge ordering, and `PropertyOverridesConvention` ships on exactly this mechanism, covered by `RelationalModelBuilderTest.cs:1323`. What makes it correct is the delayed convention scope: `Attach` call sites run inside `Model.DelayConventions()`, and `OnKeyAdded` replays after the batch closes. The plan keeps the convention and adds Step 4b — an audit of the three key-attach call sites — with the explicit fallback of moving the re-attach into `InternalKeyBuilder.Attach` if any path turns out not to be delayed.
 
 **Not changed:** the two decisions listed under Self-review notes. B9's conflict resolution is still an error rather than last-writer-wins; only its detection mechanism changed.
+
+
+---
+
+## Review round 2 — 2026-08-22
+
+A second pass over the revision confirmed the round-1 fixes and the B5 mechanism rebuttal, and raised three more. All three held.
+
+**1. A12 — deleting the tracking arm was the wrong fix (high).** Round 1 correctly observed that `temporal.ToListAsync()` and `temporal.AsNoTracking().ToListAsync()` are the same query, and then drew the wrong conclusion: it removed the tracking dimension instead of correcting it. `AsTracking()` applied *after* a temporal operator is genuinely distinct — `QueryableMethodNormalizingExpressionVisitor.ExtractQueryMetadata` visits the inner queryable first and then sets `QueryTrackingBehavior.TrackAll` (`src/EFCore/Query/Internal/QueryableMethodNormalizingExpressionVisitor.cs:294`) — and spec §3.4, §6 and §7 all require tracking coverage by name. The replacement `Temporal_operators_never_track` was vacuous besides: it projected a scalar, which tracks nothing under any mode.
+
+Fixed: `tracking` restored as an `AsTracking()` arm alongside `materialization`; a dedicated test asserts the two produce the *identical* message, which is the spec's actual wording; default-no-tracking is now proven on `Login`, an unsplit temporal control entity that really materializes; the misleading test name is gone.
+
+**2. B9 — the structural dictionary key was not injective (medium).** The first fix keyed the structural bucket on `string.Join(",", columnNames)`. That collides: one column named `A,B` encodes identically to two columns `A` and `B`, on either side of the constraint, so a single-column and a composite foreign key could bucket together and raise a spurious conflict. `DisplayName()` on the principal store object had the same flattening problem. Fixed with a `ConstraintStructure` class comparing sequences directly and hashing element counts alongside elements, keyed on the `StoreObjectIdentifier` value rather than its display string.
+
+**3. B5 — the audit inventory was incomplete (low).** Step 4b listed "three call sites", but `PropertiesSnapshot.Attach` is a fan-out point reached from at least `InternalModelBuilder.cs:263`, `InternalTypeBaseBuilder.cs:310`, `InternalComplexTypeBuilder.cs:317`, `InternalEntityTypeBuilder.cs:1687`, `InternalForeignKeyBuilder.cs:2922`, and `ComplexPropertySnapshot.cs:172`. Fixed: the step now enumerates chains transitively, includes the parallel `RelationshipSnapshot.Attach` paths for foreign keys, and ships the grep that regenerates the list. Two chains are confirmed delayed (`InternalEntityTypeBuilder.cs:1397`, `InternalModelBuilder.cs:118`) and no counterexample has been found, so the convention design still stands — the remaining work is completing the audit, not redesigning.
