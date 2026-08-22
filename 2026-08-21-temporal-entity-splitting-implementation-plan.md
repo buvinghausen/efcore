@@ -190,10 +190,16 @@ public class RelationalKeyOverridesTest
         Assert.True(RelationalKeyOverrides.Find(key, customers)!.IsNameOverridden);
         Assert.Null(RelationalKeyOverrides.Find(key, details));
 
-        // A convention-source write must not clobber an explicit one.
-        RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Convention)
-            .SetName("pk_convention", ConfigurationSource.Convention);
+        // A convention-source write must not clobber an explicit one. Precedence is enforced by
+        // the builder, not by the metadata setter — see the note below this test.
+        Assert.Null(overrides.Builder.HasName("pk_convention", ConfigurationSource.Convention));
         Assert.Equal("pk_customers", RelationalKeyOverrides.Find(key, customers)!.Name);
+
+        // And the metadata setter, called directly, does *not* protect the explicit value. Pin
+        // that too, so a later reader does not assume a guarantee the precedent never made.
+        overrides.SetName("pk_clobbered", ConfigurationSource.Convention);
+        Assert.Equal("pk_clobbered", overrides.Name);
+        overrides.SetName("pk_customers", ConfigurationSource.Explicit);
     }
 
     [ConditionalFact]
@@ -238,7 +244,9 @@ public class RelationalKeyOverridesTest
 }
 ```
 
-The `SetName` precedence assertion in the first test is the *semantic* being specified: `ConfigurationSource.Max` on write, so a convention cannot lower an explicit value. That mirrors `RelationalPropertyOverrides.SetColumnName`.
+**Precedence lives on the builder, not on the metadata setter.** `RelationalPropertyOverrides.SetColumnName` (`src/EFCore.Relational/Metadata/Internal/RelationalPropertyOverrides.cs:188`) assigns `_columnName` unconditionally and only takes `ConfigurationSource.Max` of the configuration *source*; it never refuses a write. The refusal lives in `InternalRelationalPropertyOverridesBuilder.CanSetColumnName` (`InternalRelationalPropertyOverridesBuilder.cs:56`), which `HasColumnName` (`:35`) consults before calling the setter.
+
+Copy that split exactly — `RelationalKeyOverrides.SetName` overwrites, `InternalRelationalKeyOverridesBuilder.HasName` enforces — which is why the precedence assertion above goes through `overrides.Builder`. Asserting precedence against a direct `SetName` call would fail against a faithful copy of the precedent, and the tempting "fix" would silently change the semantics for the copy only.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -848,33 +856,54 @@ Spec §4's checklist item "`Attach`/`Detach`/`MergeInto` behavior on entity-type
 
 - [ ] **Step 1: Write the failing test**
 
+**The test has to force a genuine key replacement.** Calling `HasKey(c => c.Id)` a second time re-creates nothing: `InternalEntityTypeBuilder.HasKeyInternal` (`:267`) starts with `Metadata.FindDeclaredKey(actualProperties)` and, when that hits, only bumps the configuration source and returns the existing key (`:325`). A test written that way passes with no survival machinery at all.
+
+The real detach/re-create path is base-type assignment — `SetBaseType` detaches the derived type's keys and re-attaches them on the root through `InternalKeyBuilder.Attach` (`InternalEntityTypeBuilder.cs:1693`):
+
 ```csharp
 [ConditionalFact]
-public void Key_overrides_survive_key_redefinition()
+public void Key_overrides_survive_key_re_creation_on_base_type_assignment()
 {
     var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
-    modelBuilder.Entity<Customer>(b =>
+    modelBuilder.Entity<SpecialCustomer>(b =>
     {
         b.ToTable("Customers");
         b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
     });
 
-    var entityType = modelBuilder.Model.FindEntityType(typeof(Customer))!;
-    var key = (IMutableKey)entityType.FindPrimaryKey()!;
+    var derived = modelBuilder.Model.FindEntityType(typeof(SpecialCustomer))!;
+    var key = (IMutableKey)derived.FindPrimaryKey()!;
     var customers = StoreObjectIdentifier.Table("Customers");
 
     RelationalKeyOverrides.GetOrCreate(key, customers, ConfigurationSource.Explicit)
         .SetName("pk_customers", ConfigurationSource.Explicit);
 
-    // Redefining the key detaches and re-creates it.
-    modelBuilder.Entity<Customer>().HasKey(c => c.Id);
+    // Assigning a base type detaches the derived key and re-creates it on the root type.
+    modelBuilder.Entity<Customer>();
+    modelBuilder.Entity<SpecialCustomer>().HasBaseType<Customer>();
 
     var newKey = modelBuilder.Model.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+
+    // The guard that makes this test meaningful: without it the assertions below could pass
+    // simply because nothing was ever detached.
+    Assert.NotSame(key, newKey);
+    Assert.False(((IConventionKey)key).IsInModel);
+
     Assert.Equal("pk_customers", newKey.GetName(customers));
+    Assert.Same(
+        newKey,
+        ((IConventionRelationalKeyOverrides)RelationalKeyOverrides.Find(newKey, customers)!).Key);
+}
+
+private class SpecialCustomer : Customer
+{
+    public string Tier { get; set; } = null!;
 }
 ```
 
-Write the FK analogue in `RelationalForeignKeyOverridesTest.cs`, redefining the relationship via `HasOne(...).WithMany(...)` and asserting the pair-keyed override still resolves.
+The last assertion is the one that fails without `Attach`: the override object survives as an annotation value either way, but its `Key` back-pointer stays on the dead key.
+
+Write the FK analogue in `RelationalForeignKeyOverridesTest.cs` the same way — configure the override, then force replacement by re-pointing the relationship at different FK properties (`HasOne(...).WithMany().HasForeignKey(c => c.OtherId)`), assert `NotSame` on the foreign key, and assert the pair-keyed override resolves against the new one.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -972,6 +1001,20 @@ This needs `GetOverrides()` / `RemoveOverrides(storeObject)` convenience extensi
 
 Note the difference from `PropertyOverridesConvention`: that convention early-returns for non-shared-CLR-type declaring types, because property overrides only go stale under shared-type entity types. Keys and FKs go stale under any detach/re-create, so **there is no early return here**.
 
+**Why an added-convention can see the stale overrides at all.** `InternalKeyBuilder.Attach` (`src/EFCore/Metadata/Internal/InternalKeyBuilder.cs:44`) creates the new key *first* — which raises `IKeyAddedConvention` — and only then calls `MergeAnnotationsFrom`. A convention running immediately would find an empty override collection. The pattern works anyway because every `Attach` call site runs inside a `Model.DelayConventions()` batch, and the delayed scope replays `OnKeyAdded` after the batch closes (`ConventionDispatcher.DelayedConventionScope.cs:195`, `:891`). `InternalPropertyBuilder.Attach` (`:828`) has the identical create-then-merge ordering, and `PropertyOverridesConvention` is the shipped proof that the delayed replay is what makes it correct — see `Assert.Same(bookId, overrides.Property)` at `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs:1323`.
+
+- [ ] **Step 4b: Audit the attach call sites before trusting the convention**
+
+Three call sites re-attach keys, and all three must sit inside a delay batch:
+
+| Call site | Enclosing batch |
+|---|---|
+| `src/EFCore/Metadata/Internal/InternalEntityTypeBuilder.cs:1693` (`SetBaseType`) | `Metadata.Model.DelayConventions()` at `:1397` — confirmed |
+| `src/EFCore/Metadata/Internal/InternalForeignKeyBuilder.cs:1596` | verify |
+| `src/EFCore/Metadata/Internal/PropertiesSnapshot.cs:114` | verify — depends on the caller |
+
+Confirm the two marked `verify` by reading outward from the call to the nearest `DelayConventions()`. Do the same for the FK-added path. **If any path turns out not to be delayed**, do not weaken the test: move the re-attach out of the convention and into `InternalKeyBuilder.Attach` itself, immediately after `MergeAnnotationsFrom`. That costs a relational hook in a Core file, so prefer the convention if the audit clears — and record which way it went in the commit message, because the same question decides the FK path.
+
 Write `ForeignKeyOverridesConvention` the same way over `IForeignKeyAddedConvention` and `StoreObjects`.
 
 - [ ] **Step 5: Register the conventions**
@@ -1010,7 +1053,7 @@ Spec §4, "Convention seam": `key.Builder.HasName(name, storeObject)` and the FK
 **Files:**
 - Modify: `src/EFCore.Relational/Extensions/RelationalKeyExtensions.cs`, `RelationalForeignKeyExtensions.cs`
 - Modify: `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`, `RelationalForeignKeyBuilderExtensions.cs`
-- Modify: `src/EFCore.Relational/Metadata/Builders/IConventionKeyBuilder.cs` (+ its internal implementation), and the FK equivalent
+- Modify: `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`, `RelationalForeignKeyBuilderExtensions.cs` — the convention-builder seam goes here as extension methods, **not** on the builder interfaces (see the assembly-boundary note below)
 - Test: `test/EFCore.Relational.Specification.Tests/ModelBuilding/RelationalModelBuilderTest.cs`
 
 **Interfaces:**
@@ -1021,16 +1064,20 @@ Spec §4, "Convention seam": `key.Builder.HasName(name, storeObject)` and the FK
   - `static ConfigurationSource? RelationalKeyExtensions.GetNameConfigurationSource(this IConventionKey key, in StoreObjectIdentifier storeObject)`
   - `static IEnumerable<IReadOnlyRelationalKeyOverrides> RelationalKeyExtensions.GetOverrides(this IReadOnlyKey key)` and `IMutableRelationalKeyOverrides? RemoveOverrides(this IMutableKey key, in StoreObjectIdentifier storeObject)`
   - `static KeyBuilder RelationalKeyBuilderExtensions.HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)` and the generic `KeyBuilder<TEntity>` overload
-  - `IConventionKeyBuilder? IConventionKeyBuilder.HasName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)` and `bool CanSetName(string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
+  - `static IConventionKeyBuilder? RelationalKeyBuilderExtensions.HasName(this IConventionKeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)` and `static bool RelationalKeyBuilderExtensions.CanSetName(this IConventionKeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject, bool fromDataAnnotation = false)`
   - the FK equivalents, all taking both store objects — named explicitly because later tasks call them:
     - `static void RelationalForeignKeyExtensions.SetConstraintName(this IMutableForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
     - `static string? RelationalForeignKeyExtensions.SetConstraintName(this IConventionForeignKey foreignKey, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)`
     - `static ConfigurationSource? RelationalForeignKeyExtensions.GetConstraintNameConfigurationSource(this IConventionForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
     - `static IEnumerable<IReadOnlyRelationalForeignKeyOverrides> RelationalForeignKeyExtensions.GetOverrides(this IReadOnlyForeignKey foreignKey)` and `IMutableRelationalForeignKeyOverrides? RemoveOverrides(this IMutableForeignKey foreignKey, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`
     - `static ReferenceCollectionBuilder RelationalForeignKeyBuilderExtensions.HasConstraintName(this ReferenceCollectionBuilder builder, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject)`, plus the generic and `ReferenceReferenceBuilder` overloads that the existing `HasConstraintName(string?)` already has — mirror that method's full overload set exactly
-    - `IConventionForeignKeyBuilder? IConventionForeignKeyBuilder.HasConstraintName(string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)` and the matching `CanSetConstraintName`
+    - `static IConventionForeignKeyBuilder? RelationalForeignKeyBuilderExtensions.HasConstraintName(this IConventionForeignKeyBuilder builder, string? name, in StoreObjectIdentifier storeObject, in StoreObjectIdentifier principalStoreObject, bool fromDataAnnotation = false)` and the matching `CanSetConstraintName` extension
 
 Each FK extension constructs the `StoreObjectPair` internally, so callers never handle the pair type unless they want to.
+
+**Assembly boundary — the convention seam cannot go on the interfaces.** `IConventionKeyBuilder` and `IConventionForeignKeyBuilder` live in `src/EFCore/Metadata/Builders/`, in the Core assembly. `StoreObjectIdentifier` is a Relational type, and Relational references Core, not the other way round (`src/EFCore.Relational/EFCore.Relational.csproj:48`). A store-object overload on either interface would not compile, and there is no `src/EFCore.Relational/Metadata/Builders/IConventionKeyBuilder.cs` to modify.
+
+Every relational convention-builder API is already shaped this way: `RelationalKeyBuilderExtensions.HasName(this IConventionKeyBuilder, string?, bool)` and its `CanSetName` sit at `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs:61` and `:84` as extension methods over the Core interface. Mirror that; consumers — EFCore.NamingConventions included — call them identically to instance members.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1179,7 +1226,28 @@ To `src/EFCore.Relational/Extensions/RelationalKeyBuilderExtensions.cs`:
         => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name, storeObject);
 ```
 
-Add the convention-builder members to `IConventionKeyBuilder` and its implementation, following the existing `HasName(string?, bool)` pair on that interface. `CanSetName(name, storeObject, fromDataAnnotation)` must compare against `GetNameConfigurationSource(storeObject)` — this is the seam NamingConventions calls, so it has to respect explicit user configuration.
+Add the convention-builder seam as extension methods in `RelationalKeyBuilderExtensions`, directly below the existing `HasName(this IConventionKeyBuilder, string?, bool)` / `CanSetName` pair (`:61`, `:84`) and following its exact shape:
+
+```csharp
+    public static IConventionKeyBuilder? HasName(
+        this IConventionKeyBuilder keyBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        bool fromDataAnnotation = false)
+    {
+        if (!keyBuilder.CanSetName(name, storeObject, fromDataAnnotation))
+        {
+            return null;
+        }
+
+        keyBuilder.Metadata.SetName(name, storeObject, fromDataAnnotation);
+        return keyBuilder;
+    }
+```
+
+`CanSetName(name, storeObject, fromDataAnnotation)` must compare against `GetNameConfigurationSource(storeObject)` — this is the seam NamingConventions calls, so it has to respect explicit user configuration. It cannot delegate to `CanSetAnnotation` the way the global overload does, because the value being guarded lives inside the `StoreObjectDictionary` rather than in a single annotation.
+
+Write the FK pair the same way on `RelationalForeignKeyBuilderExtensions`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1239,8 +1307,16 @@ public virtual Task Per_store_object_constraint_names_survive_the_compiled_model
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: FAIL — the compiled model resolves the default names because the override annotation was dropped or left in its design-time form.
+**Run the provider suites, not `EFCore.Relational.Tests`.** The test lands on abstract `CompiledModelRelationalTestBase` (`test/EFCore.Relational.Specification.Tests/Scaffolding/CompiledModelRelationalTestBase.cs:12`), which has no concrete subclass in `EFCore.Relational.Tests` — that project compiles the specification assembly but never discovers the fact, so running it there reports success without executing anything. The concrete subclasses are `test/EFCore.SqlServer.FunctionalTests/Scaffolding/CompiledModelSqlServerTest.cs:17` and `test/EFCore.Sqlite.FunctionalTests/Scaffolding/CompiledModelSqliteTest.cs`. Run both here rather than deferring the discovery to Task B10.
+
+```bash
+./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj --filter-class '*CompiledModelSqlServerTest'
+./build.sh --test --projects $PWD/test/EFCore.Sqlite.FunctionalTests/EFCore.Sqlite.FunctionalTests.csproj --filter-class '*CompiledModelSqliteTest'
+```
+
+The SQL Server run needs `Test__SqlServer__DefaultConnection`; the SQLite run does not.
+
+Expected: FAIL — the compiled model resolves the default names because the override annotation was dropped or left in its design-time form. If instead the run reports zero tests executed, the fact was not discovered; check the subclass, not the code.
 
 - [ ] **Step 3: Create the runtime types**
 
@@ -1284,8 +1360,8 @@ If `ProcessKeyAnnotations` / `ProcessForeignKeyAnnotations` do not exist on this
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `./build.sh --test --projects $PWD/test/EFCore.Relational.Tests/EFCore.Relational.Tests.csproj`
-Expected: PASS.
+Run both provider commands from Step 2.
+Expected: PASS, with a non-zero executed-test count in each.
 
 - [ ] **Step 7: Commit**
 
@@ -1316,29 +1392,42 @@ Without this, `dotnet ef migrations add` drops the overrides from the snapshot a
 
 - [ ] **Step 1: Write the failing test**
 
+**Use the round-trip harness, not a text search.** `CSharpMigrationsGeneratorTestBase.Test(buildModel, expectedCode, assert, fullSnapshot)` (`test/EFCore.Design.Tests/Migrations/Design/CSharpMigrationsGeneratorTestBase.cs:37`) already does exactly what this task needs to prove: it generates the snapshot, **compiles it** through `BuildModelFromSnapshotSource`, runs the asserter against the *rebuilt* model, and finally asserts `modelDiffer.GetDifferences(rebuilt, original)` is empty (`:69`). Asserting `Assert.Contains("pk_customers", code)` proves only that a string was emitted somewhere — it would pass on an emission that does not compile, does not rebuild, or rebuilds into a different model. That matters more here than usual, because this task invents a literal form for `StoreObjectPair` that has never been round-tripped.
+
 ```csharp
 [ConditionalFact]
-public void Snapshot_emits_per_store_object_key_constraint_names()
-{
-    var modelBuilder = CreateConventionalModelBuilder();
-    modelBuilder.Entity<Customer>(b =>
-    {
-        b.ToTable("Customers");
-        b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
-        b.HasKey(c => c.Id)
-            .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
-            .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
-    });
-
-    var code = GenerateSnapshotCode(modelBuilder.FinalizeModel());
-
-    Assert.Contains("\"pk_customers\"", code);
-    Assert.Contains("\"pk_customer_details\"", code);
-    Assert.DoesNotContain("HasAnnotation(\"Relational:KeyOverrides\"", code);
-}
+public void Snapshot_round_trips_per_store_object_key_constraint_names()
+    => Test(
+        modelBuilder => modelBuilder.Entity<Customer>(b =>
+        {
+            b.ToTable("Customers");
+            b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+            b.HasKey(c => c.Id)
+                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"))
+                .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails"));
+        }),
+        """
+                    b.HasKey("Id")
+                        .HasName("pk_customers", StoreObjectIdentifier.Table("Customers"));
+        """,
+        (snapshotModel, sourceModel) =>
+        {
+            var key = snapshotModel.FindEntityType(typeof(Customer))!.FindPrimaryKey()!;
+            Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers")));
+            Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails")));
+        },
+        fullSnapshot: false);
 ```
 
-Use the file's existing snapshot-generation helper in place of `GenerateSnapshotCode`.
+Match the indentation of the `expectedCode` fragment to what the generator actually emits — run once, read the failure output (the harness prints the full generated code on mismatch), then paste the real fragment.
+
+Write three more, all through the same harness:
+
+1. The FK equivalent, emitting both store objects, asserting `GetConstraintName(dependent, principal)` on the rebuilt model.
+2. The explicit-null case from Task B2 — a global `SetName("pk_global")` plus a `null` override on the fragment. The rebuilt model must still resolve the fragment to its *default* name, which is the only assertion that proves `IsNameOverridden: true, Name: null` survived rather than collapsing into "unset".
+3. A negative: `Assert.DoesNotContain` the raw annotation name in the generated code, guarding Step 3.
+
+The empty-diff assertion inside `Test` is what actually catches a broken literal, so none of these need to inspect the generated text beyond case 3.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -1431,7 +1520,9 @@ Two remaining spec §4 checklist items — "shared-constraint/root-FK behavior w
 
 **Interfaces:**
 - Consumes: all of Phase B so far.
-- Produces: `RelationalStrings.DuplicateConstraintNameOverride(table, constraintName, otherConstraintName)`.
+- Produces:
+  - `RelationalStrings.DuplicateConstraintNameOverride(table, constraintName, otherConstraintName)`
+  - `protected virtual void RelationalModelValidator.ValidateSharedForeignKeyNameOverrides(IReadOnlyList<IEntityType> mappedTypes, in StoreObjectIdentifier table, IDiagnosticsLogger<DbLoggerCategory.Model.Validation> logger)` — a **new** method, called from `:1029` next to `ValidateSharedForeignKeysCompatibility`
 
 - [ ] **Step 1: Write the failing differ test**
 
@@ -1472,13 +1563,18 @@ Expected: PASS already, in fact — Spike 2 finding 2 predicts the differ consum
 
 - [ ] **Step 3: Write the failing shared-constraint conflict test**
 
+Two things the obvious version of this test gets wrong, both fatal:
+
+1. **Table splitting needs an identifying relationship.** Two entity types mapped to `Orders` with no relationship between them are rejected by `RelationalStrings.IncompatibleTableNoRelationship` (`src/EFCore.Relational/Infrastructure/RelationalModelValidator.cs:1187`) long before any constraint-name check runs. The test would pass for entirely the wrong reason. Give `OrderDetails` a required one-to-one on the shared primary key.
+2. **The conflict is invisible to name-keyed bucketing.** `ValidateSharedForeignKeysCompatibility` buckets by the *resolved* constraint name (`:1829`, `foreignKeyMappings[foreignKeyName]`), so `fk_a` and `fk_b` land in different buckets and are never compared. Adding the check inside that method cannot work; Step 4 adds a name-independent one instead.
+
 ```csharp
 [ConditionalFact]
 public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
 {
     var modelBuilder = RelationalTestHelpers.Instance.CreateConventionBuilder();
 
-    // Two entity types sharing a table, each with a matching FK that deduplicates to one constraint.
+    modelBuilder.Entity<Customer>().ToTable("Customers");
     modelBuilder.Entity<Order>(b =>
     {
         b.ToTable("Orders");
@@ -1487,25 +1583,35 @@ public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
     modelBuilder.Entity<OrderDetails>(b =>
     {
         b.ToTable("Orders");
-        b.HasOne<Customer>().WithMany().HasForeignKey(o => o.CustomerId);
+        // The identifying relationship that makes this table splitting rather than a collision.
+        b.HasOne<Order>().WithOne().HasForeignKey<OrderDetails>(d => d.Id);
+        b.HasOne<Customer>().WithMany().HasForeignKey(d => d.CustomerId);
     });
-    modelBuilder.Entity<Customer>().ToTable("Customers");
 
     var orders = StoreObjectIdentifier.Table("Orders");
     var customers = StoreObjectIdentifier.Table("Customers");
 
-    foreach (var (entityClrType, name) in new[] { (typeof(Order), "fk_a"), (typeof(OrderDetails), "fk_b") })
-    {
-        var foreignKey = (IMutableForeignKey)modelBuilder.Model.FindEntityType(entityClrType)!
-            .GetForeignKeys().Single();
-        foreignKey.SetConstraintName(name, orders, customers);
-    }
+    // Sanity check the premise: without overrides these two resolve to one constraint name,
+    // which is what makes them "the same database constraint".
+    var orderFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(Order))!
+        .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(Customer));
+    var detailsFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(OrderDetails))!
+        .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(Customer));
 
-    Assert.Contains(
-        "fk_a",
-        Assert.Throws<InvalidOperationException>(() => modelBuilder.FinalizeModel()).Message);
+    Assert.Equal(
+        orderFk.GetConstraintName(orders, customers),
+        detailsFk.GetConstraintName(orders, customers));
+
+    orderFk.SetConstraintName("fk_a", orders, customers);
+    detailsFk.SetConstraintName("fk_b", orders, customers);
+
+    var message = Assert.Throws<InvalidOperationException>(() => modelBuilder.FinalizeModel()).Message;
+    Assert.Contains("fk_a", message);
+    Assert.Contains("fk_b", message);
 }
 ```
+
+The `Assert.Equal` in the middle is load-bearing: if a future change makes the two FKs resolve to different default names, they were never one constraint and this test stops testing anything. It fails loudly instead of passing vacuously.
 
 - [ ] **Step 4: Add the validation and its string**
 
@@ -1529,7 +1635,82 @@ public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
                 table, constraintName, otherConstraintName);
 ```
 
-Add the check inside `RelationalModelValidator.ValidateSharedForeignKeysCompatibility` (grep for it — it already walks the FKs that deduplicate onto one constraint) comparing `GetConstraintName(storeObject, principalStoreObject)` across the sharing set and throwing on disagreement.
+Add a **new** method rather than extending `ValidateSharedForeignKeysCompatibility`, and call it from `RelationalModelValidator.cs:1029`, immediately after that method:
+
+```csharp
+        ValidateSharedForeignKeysCompatibility(nonJsonMappedTypes, table, logger);
+        ValidateSharedForeignKeyNameOverrides(nonJsonMappedTypes, table, logger);
+```
+
+The grouping key has to be **structural**, not the resolved name — that is the whole point. Two foreign keys are "the same database constraint" when they produce the same columns, the same principal table, and the same principal key columns; `RelationalModel` then folds them together, but only if their names already agree (`src/EFCore.Relational/Metadata/Internal/RelationalModel.cs:2101`, `table.ForeignKeyConstraints.FirstOrDefault(fk => fk.Name == name)`). Conflicting names therefore do not produce a "shared constraint with two names"; they produce **two structurally identical constraints on one table**, which is the DDL duplication this check exists to reject.
+
+```csharp
+    /// <summary>
+    ///     Validates that entity types sharing a table do not configure conflicting per-store-object
+    ///     names for what is structurally the same foreign key constraint.
+    /// </summary>
+    /// <param name="mappedTypes">The mapped entity types.</param>
+    /// <param name="table">The table identifier.</param>
+    /// <param name="logger">The logger to use.</param>
+    protected virtual void ValidateSharedForeignKeyNameOverrides(
+        IReadOnlyList<IEntityType> mappedTypes,
+        in StoreObjectIdentifier table,
+        IDiagnosticsLogger<DbLoggerCategory.Model.Validation> logger)
+    {
+        if (table.StoreObjectType != StoreObjectType.Table)
+        {
+            return;
+        }
+
+        var namesByStructure = new Dictionary<(string, string, string), (IForeignKey, string)>();
+
+        foreach (var foreignKey in mappedTypes.SelectMany(et => et.GetDeclaredForeignKeys()))
+        {
+            var principalTable = foreignKey.PrincipalKey.IsPrimaryKey()
+                ? StoreObjectIdentifier.Create(foreignKey.PrincipalEntityType, StoreObjectType.Table)
+                : StoreObjectIdentifier.Create(foreignKey.PrincipalKey.DeclaringEntityType, StoreObjectType.Table);
+            if (principalTable == null)
+            {
+                continue;
+            }
+
+            var name = foreignKey.GetConstraintName(table, principalTable.Value, logger);
+            if (name == null)
+            {
+                continue;
+            }
+
+            // Structural identity: the dependent columns in *this* table, the principal table, and
+            // the principal key columns. Deliberately name-independent — bucketing by the resolved
+            // name is exactly what makes ValidateSharedForeignKeysCompatibility blind to this case.
+            var dependentColumns = string.Join(
+                ",", foreignKey.Properties.Select(pr => pr.GetColumnName(table) ?? pr.Name));
+            var principalColumns = string.Join(
+                ",",
+                foreignKey.PrincipalKey.Properties.Select(
+                    pr => pr.GetColumnName(principalTable.Value) ?? pr.Name));
+            var structure = (dependentColumns, principalTable.Value.DisplayName(), principalColumns);
+
+            if (!namesByStructure.TryGetValue(structure, out var existing))
+            {
+                namesByStructure[structure] = (foreignKey, name);
+                continue;
+            }
+
+            if (existing.Item2 != name)
+            {
+                throw new InvalidOperationException(
+                    RelationalStrings.DuplicateConstraintNameOverride(
+                        table.DisplayName(), existing.Item2, name));
+            }
+        }
+    }
+```
+
+Two notes for the implementer:
+
+- Columns, not properties, are the right structural unit. Two entity types sharing a table map different property objects onto the same column, so comparing `IProperty` identity would put every sharing pair in its own bucket and the check would never fire.
+- `GetColumnName(table)` can return `null` for a property not mapped to this table. Falling back to the property name (as above) keeps such a foreign key in a bucket of its own rather than colliding with an unrelated one; it never produces a false positive, only a missed one, which is the safe direction for a new error.
 
 - [ ] **Step 5: Write the NamingConventions-shaped end-to-end test**
 
@@ -2199,20 +2380,35 @@ Append to `SqlServerTemporalMetadata`:
             return null;
         }
 
-        // Validation guarantees the history and period facets agree across every mapping on this
-        // table, so any mapping carrying them answers for all of them. Root types are preferred
-        // because period/history annotations live on the root in a TPH hierarchy.
+        // Validation (Task A5) guarantees the history and period facets agree across every mapping
+        // on this table, so any mapping carrying them answers for all of them — but "any" still has
+        // to be a *stable* choice, because the annotation provider emits migrations from whatever
+        // this returns. Returning the first qualifying mapping would make that emission depend on
+        // EntityTypeMappings order, which is exactly what this reader exists to avoid.
+        IEntityType? candidate = null;
         foreach (var mapping in table.EntityTypeMappings)
         {
-            if (mapping.TypeBase is IEntityType entityType
-                && entityType.IsTemporal()
-                && entityType.GetPeriodStartPropertyName() != null)
+            if (mapping.TypeBase is not IEntityType entityType
+                || !entityType.IsTemporal()
+                || entityType.GetPeriodStartPropertyName() == null)
             {
-                return entityType;
+                continue;
+            }
+
+            if (candidate == null || Preferred(entityType, candidate))
+            {
+                candidate = entityType;
             }
         }
 
-        return null;
+        return candidate;
+
+        // Root types outrank derived ones — period and history annotations live on the root in a
+        // TPH hierarchy. Remaining ties break on ordinal name order, which is arbitrary but total.
+        static bool Preferred(IEntityType candidate, IEntityType incumbent)
+            => (candidate.BaseType == null) != (incumbent.BaseType == null)
+                ? candidate.BaseType == null
+                : StringComparer.Ordinal.Compare(candidate.Name, incumbent.Name) < 0;
     }
 
     /// <summary>
@@ -2672,7 +2868,27 @@ public void Detects_inconsistent_history_table_across_shared_table()
         SqlServerStrings.TemporalInconsistentHistoryTableForSharedTable("Users"),
         modelBuilder);
 }
+
+[ConditionalFact]
+public void Detects_inconsistent_period_visibility_across_shared_table()
+{
+    var modelBuilder = CreateConventionModelBuilder();
+    modelBuilder.Entity<User>(b =>
+    {
+        // Explicitly visible on one side; the default is hidden, so the other side disagrees.
+        b.ToTable("Users", t => t.IsTemporal(ttb => ttb.HasPeriodStart("Start").IsHidden(false)));
+        b.HasOne<UserProfile>().WithOne().HasForeignKey<UserProfile>(p => p.Id);
+    });
+    modelBuilder.Entity<UserProfile>(
+        b => b.ToTable("Users", t => t.IsTemporal(ttb => ttb.HasPeriodStart("Start"))));
+
+    VerifyError(
+        SqlServerStrings.TemporalInconsistentPeriodVisibilityForSharedTable("Users", "start"),
+        modelBuilder);
+}
 ```
+
+The visibility case is not decorative. Hidden state is a *property* annotation (`SqlServerPropertyExtensions.IsHidden`, defaulting to `true` at `:1050`), so two entity types sharing a table each carry their own, and `SqlServerAnnotationProvider` emits `TemporalPeriodStartHidden` / `TemporalPeriodEndHidden` from whichever period property it resolves (`src/EFCore.SqlServer/Metadata/Internal/SqlServerAnnotationProvider.cs:149`). Without this check, a disagreement makes the emitted migration depend on which mapping the Task A3 reader picks — the precise failure that reader's determinism rule is meant to be redundant against, not a substitute for.
 
 Add the `UserProfile` fixture:
 
@@ -2697,6 +2913,9 @@ Expected: compile error on the two new `SqlServerStrings` members. The first tes
   <data name="TemporalInconsistentHistoryTableForSharedTable" xml:space="preserve">
     <value>Entity types mapped to table '{table}' specify different temporal history tables. All entity types sharing a temporal table must use the same history table name and schema.</value>
   </data>
+  <data name="TemporalInconsistentPeriodVisibilityForSharedTable" xml:space="preserve">
+    <value>Entity types mapped to table '{table}' disagree about whether the period {period} column is hidden. All entity types sharing a temporal table must configure the same visibility for each period column.</value>
+  </data>
   <data name="TemporalInconsistentTemporalStateForSharedTable" xml:space="preserve">
     <value>Entity types mapped to table '{table}' disagree about whether the table is temporal. All entity types sharing a table must resolve to the same temporal configuration for that table.</value>
   </data>
@@ -2712,6 +2931,14 @@ Expected: compile error on the two new `SqlServerStrings` members. The first tes
             => string.Format(
                 GetString("TemporalInconsistentHistoryTableForSharedTable", nameof(table)),
                 table);
+
+        /// <summary>
+        ///     Entity types mapped to table '{table}' disagree about whether the period {period} column is hidden. All entity types sharing a temporal table must configure the same visibility for each period column.
+        /// </summary>
+        public static string TemporalInconsistentPeriodVisibilityForSharedTable(object? table, object? period)
+            => string.Format(
+                GetString("TemporalInconsistentPeriodVisibilityForSharedTable", nameof(table), nameof(period)),
+                table, period);
 
         /// <summary>
         ///     Entity types mapped to table '{table}' disagree about whether the table is temporal. All entity types sharing a table must resolve to the same temporal configuration for that table.
@@ -2775,6 +3002,8 @@ Replace the whole method body in `SqlServerModelValidator.cs`:
         // (3) Period column identity and hidden-state facets must agree.
         var expectedPeriodStartColumnName = default(string);
         var expectedPeriodEndColumnName = default(string);
+        var expectedPeriodStartHidden = default(bool?);
+        var expectedPeriodEndHidden = default(bool?);
 
         foreach (var mappedType in mappedTypes.Where(t => t.BaseType == null))
         {
@@ -2794,9 +3023,11 @@ Replace the whole method body in `SqlServerModelValidator.cs`:
             }
 
             ValidatePeriodColumnConsensus(
-                mappedType, table, periodStart: true, ref expectedPeriodStartColumnName);
+                mappedType, table, periodStart: true,
+                ref expectedPeriodStartColumnName, ref expectedPeriodStartHidden);
             ValidatePeriodColumnConsensus(
-                mappedType, table, periodStart: false, ref expectedPeriodEndColumnName);
+                mappedType, table, periodStart: false,
+                ref expectedPeriodEndColumnName, ref expectedPeriodEndHidden);
         }
     }
 
@@ -2804,7 +3035,8 @@ Replace the whole method body in `SqlServerModelValidator.cs`:
         IEntityType mappedType,
         in StoreObjectIdentifier table,
         bool periodStart,
-        ref string? expectedColumnName)
+        ref string? expectedColumnName,
+        ref bool? expectedHidden)
     {
         var periodPropertyName = periodStart
             ? mappedType.GetPeriodStartPropertyName()
@@ -2834,6 +3066,27 @@ Replace the whole method body in `SqlServerModelValidator.cs`:
                     periodPropertyName,
                     columnName,
                     expectedColumnName));
+        }
+
+        // Hidden state is a property annotation, so each mapping carries its own. It reaches the
+        // emitted table operation through SqlServerAnnotationProvider (:149), which means a
+        // disagreement here would make migrations depend on which mapping is read.
+        if (periodProperty == null)
+        {
+            return;
+        }
+
+        var hidden = periodProperty.IsHidden();
+        if (expectedHidden == null)
+        {
+            expectedHidden = hidden;
+        }
+        else if (expectedHidden != hidden)
+        {
+            throw new InvalidOperationException(
+                SqlServerStrings.TemporalInconsistentPeriodVisibilityForSharedTable(
+                    table.DisplayName(),
+                    periodStart ? "start" : "end"));
         }
     }
 ```
@@ -3571,7 +3824,9 @@ Note the `temporalRoot: false` model still carries `s.IsTemporal(false)` on the 
 
 Add to `test/EFCore.SqlServer.FunctionalTests/Migrations/MigrationsInfrastructureSqlServerTest.cs` a test that generates an idempotent script for a migration containing the split-temporal model, following that file's existing script-generation tests. Assert the generated script wraps each operation in the `IF NOT EXISTS`-style guard the file's other baselines show, and that no guard references a period column on `UserLockout`.
 
-- [ ] **Step 8: Row 10 — snapshot / runtime / compiled model diffing**
+- [ ] **Step 8: Row 10 — snapshot round-trip self-diff**
+
+Scope note: the `Test(...)` harness round-trips the source model through a generated-and-compiled *snapshot* and diffs that against the runtime model (`test/EFCore.Relational.Specification.Tests/Migrations/MigrationsTestBase.cs:3519`). It does **not** exercise the compiled model — that is covered by `CompiledModelSqlServerTest` in Task A7. Do not read a pass here as compiled-model coverage.
 
 ```csharp
     [Fact]
@@ -3625,92 +3880,114 @@ Spec §3.3, "Populated-database transition contract". Fresh-database DDL does no
 
 - [ ] **Step 1: Write the failing integration test**
 
-This test must not use the pure-differ `Test(...)` harness — it needs real data in the table before the migration runs. Use the raw-SQL facilities the file's other database-touching tests use (`TestStore.ExecuteNonQuery` / `context.Database.ExecuteSqlRaw`).
+**This test cannot use the `Test(...)` harness at all — not even as a first step.** Every overload funnels into `Test(IModel sourceModel, IModel? targetModel, IReadOnlyList<MigrationOperation> operations, ...)`, which ends in `finally { await Fixture.TestStore.CleanAsync(context); }` (`test/EFCore.Relational.Specification.Tests/Migrations/MigrationsTestBase.cs:3591`, `:3616`). The store is dropped before control returns, so an `INSERT INTO [Users]` written after an `await Test(...)` runs against a table that no longer exists.
+
+Hand-written DDL is also the wrong proof. The claim under test is that an *edited EF migration* moves the data correctly, so the migration operations must come from `IMigrationsModelDiffer` with the backfill spliced in as a `SqlOperation` — which is exactly what a developer does when they edit the scaffolded file.
+
+The test therefore owns the whole create → seed → migrate → verify lifecycle inside one connection scope, borrowing the harness's service resolution but not its cleanup:
 
 ```csharp
-    [Fact]
+    [ConditionalFact]
     public virtual async Task Split_columns_out_of_populated_temporal_table_preserves_current_data()
     {
-        // 1. Start from a populated, already-temporal, unsplit Users table.
-        await Test(
-            builder => { },
-            builder => builder.Entity(
-                "User", e =>
+        var context = CreateContext();
+        var services = ((IInfrastructure<IServiceProvider>)context).Instance;
+        var modelRuntimeInitializer = services.GetRequiredService<IModelRuntimeInitializer>();
+        var modelDiffer = services.GetRequiredService<IMigrationsModelDiffer>();
+        var sqlGenerator = services.GetRequiredService<IMigrationsSqlGenerator>();
+        var commandExecutor = services.GetRequiredService<IMigrationCommandExecutor>();
+        var connection = services.GetRequiredService<IRelationalConnection>();
+
+        IModel Build(Action<ModelBuilder> build)
+        {
+            var builder = CreateModelBuilder(withConventions: true);
+            build(builder);
+            return modelRuntimeInitializer.Initialize(
+                (IModel)builder.Model, designTime: true, validationLogger: null);
+        }
+
+        var sourceModel = Build(b => BuildSplitTemporalUser(b, split: false));
+        var targetModel = Build(b => BuildSplitTemporalUser(b, split: true));
+
+        // Read the history table name off the model rather than hardcoding it — the convention
+        // owns that name and this test should not be the thing that pins it.
+        var historyTable = sourceModel.FindEntityType("User")!.GetHistoryTableName()!;
+
+        async Task ExecuteAsync(string sql)
+            => await commandExecutor.ExecuteNonQueryAsync(
+                sqlGenerator.Generate([new SqlOperation { Sql = sql }], sourceModel), connection);
+
+        try
+        {
+            // 1. Create the unsplit, already-temporal Users table and populate it.
+            await commandExecutor.ExecuteNonQueryAsync(
+                sqlGenerator.Generate(
+                    modelDiffer.GetDifferences(null, sourceModel.GetRelationalModel()), sourceModel),
+                connection);
+
+            await ExecuteAsync(
+                $"""
+                INSERT INTO [Users] ([Email], [PasswordHash], [AccessFailedCount])
+                VALUES (N'a@example.com', N'hash-a', 1), (N'b@example.com', N'hash-b', 0);
+                """);
+
+            // 2. The generated migration, edited exactly as the recipe in Step 3 instructs: the
+            //    hand-authored backfill goes after CreateTable and before the first DropColumn.
+            var operations = modelDiffer
+                .GetDifferences(sourceModel.GetRelationalModel(), targetModel.GetRelationalModel())
+                .ToList();
+
+            var createIndex = operations.FindIndex(o => o is CreateTableOperation);
+            var firstDropIndex = operations.FindIndex(o => o is DropColumnOperation);
+
+            // If this ordering assumption ever breaks, the recipe in Step 3 is wrong too.
+            Assert.True(createIndex >= 0 && firstDropIndex > createIndex);
+
+            operations.Insert(
+                firstDropIndex,
+                new SqlOperation
                 {
-                    e.Property<int>("Id").ValueGeneratedOnAdd();
-                    e.Property<string>("Email");
-                    e.Property<string>("PasswordHash");
-                    e.Property<int>("AccessFailedCount");
-                    e.Property<DateTime>("SystemTimeStart").ValueGeneratedOnAddOrUpdate();
-                    e.Property<DateTime>("SystemTimeEnd").ValueGeneratedOnAddOrUpdate();
-                    e.HasKey("Id");
-                    e.ToTable("Users", tb => tb.IsTemporal(ttb =>
-                    {
-                        ttb.HasPeriodStart("SystemTimeStart");
-                        ttb.HasPeriodEnd("SystemTimeEnd");
-                    }));
-                }),
-            model => Assert.Contains(model.Tables, t => t.Name == "Users"));
+                    Sql = $"""
+                        INSERT INTO [UserLockout] ([Id], [PasswordHash], [AccessFailedCount])
+                        SELECT [Id], [PasswordHash], [AccessFailedCount] FROM [Users];
+                        """
+                });
 
-        await ExecuteSqlAsync(
-            """
-            INSERT INTO [Users] ([Email], [PasswordHash], [AccessFailedCount])
-            VALUES (N'a@example.com', N'hash-a', 1), (N'b@example.com', N'hash-b', 0);
-            """);
+            await commandExecutor.ExecuteNonQueryAsync(
+                sqlGenerator.Generate(operations, targetModel), connection);
 
-        // 2. Apply the edited migration: create the fragment, backfill, then drop the columns.
-        //    Steps 2a and 2c are what the differ generates; 2b is the hand-authored backfill.
-        await ExecuteSqlAsync(
-            """
-            CREATE TABLE [UserLockout] (
-                [Id] int NOT NULL,
-                [PasswordHash] nvarchar(max) NULL,
-                [AccessFailedCount] int NOT NULL,
-                CONSTRAINT [PK_UserLockout] PRIMARY KEY ([Id]),
-                CONSTRAINT [FK_UserLockout_Users_Id] FOREIGN KEY ([Id]) REFERENCES [Users] ([Id]) ON DELETE CASCADE
-            );
+            // 3. Current data survives the transition intact.
+            Assert.Equal(
+                [("a@example.com", "hash-a", 1), ("b@example.com", "hash-b", 0)],
+                await ReadUsersAsync(context));
 
-            INSERT INTO [UserLockout] ([Id], [PasswordHash], [AccessFailedCount])
-            SELECT [Id], [PasswordHash], [AccessFailedCount] FROM [Users];
+            // 4. Post-transition writes to the fragment mint no history rows; writes to the root do.
+            await ExecuteAsync("UPDATE [UserLockout] SET [AccessFailedCount] = 5 WHERE [Id] = 1;");
+            Assert.Equal(0, await ScalarAsync<int>(context, $"SELECT COUNT(*) FROM [{historyTable}];"));
 
-            ALTER TABLE [Users] SET (SYSTEM_VERSIONING = OFF);
-            ALTER TABLE [Users] DROP COLUMN [PasswordHash];
-            ALTER TABLE [Users] DROP COLUMN [AccessFailedCount];
-            ALTER TABLE [UserHistory] DROP COLUMN [PasswordHash];
-            ALTER TABLE [UserHistory] DROP COLUMN [AccessFailedCount];
-            ALTER TABLE [Users] SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [dbo].[UserHistory]));
-            """);
-
-        // 3. Current data survives the transition intact.
-        var rows = await QueryAsync(
-            """
-            SELECT u.[Email], l.[PasswordHash], l.[AccessFailedCount]
-            FROM [Users] u JOIN [UserLockout] l ON u.[Id] = l.[Id]
-            ORDER BY u.[Email];
-            """);
-
-        Assert.Collection(
-            rows,
-            r => Assert.Equal(["a@example.com", "hash-a", 1], r),
-            r => Assert.Equal(["b@example.com", "hash-b", 0], r));
-
-        // 4. Post-transition writes to the fragment mint no history rows; writes to the root do.
-        await ExecuteSqlAsync("UPDATE [UserLockout] SET [AccessFailedCount] = 5 WHERE [Id] = 1;");
-        Assert.Equal(0, await ScalarAsync<int>("SELECT COUNT(*) FROM [UserHistory];"));
-
-        await ExecuteSqlAsync("UPDATE [Users] SET [Email] = N'a2@example.com' WHERE [Id] = 1;");
-        Assert.Equal(1, await ScalarAsync<int>("SELECT COUNT(*) FROM [UserHistory];"));
+            await ExecuteAsync("UPDATE [Users] SET [Email] = N'a2@example.com' WHERE [Id] = 1;");
+            Assert.Equal(1, await ScalarAsync<int>(context, $"SELECT COUNT(*) FROM [{historyTable}];"));
+        }
+        finally
+        {
+            using var _ = Fixture.TestSqlLoggerFactory.SuspendRecordingEvents();
+            await Fixture.TestStore.CleanAsync(context);
+        }
     }
 ```
 
-`ExecuteSqlAsync`, `QueryAsync`, and `ScalarAsync<T>` stand in for whatever raw-SQL helpers this fixture already exposes. Find them in `MigrationsSqlServerTest.cs` / `MigrationsTestBase` before writing the test and use the real names; if none exist, add three small private helpers over `Fixture.TestStore` in `MigrationsSqlServerTest.cs` rather than inventing a new fixture.
+Three supporting pieces to write alongside it:
+
+- **`BuildSplitTemporalUser(builder, split)`** — extend the Task A8 helper with a `split` flag rather than adding a second near-duplicate model builder. `split: false` omits the `SplitToTable` call and keeps `PasswordHash`/`AccessFailedCount` on `Users`; `split: true` is the Task A8 model unchanged. Keeping both models in one method is what guarantees the diff is a pure split and not an incidental schema difference.
+- **`ReadUsersAsync(context)`** — a private helper returning `(string Email, string PasswordHash, int AccessFailedCount)[]` from `SELECT u.[Email], l.[PasswordHash], l.[AccessFailedCount] FROM [Users] u JOIN [UserLockout] l ON u.[Id] = l.[Id] ORDER BY u.[Email]`, over `context.Database.GetDbConnection()`.
+- **`ScalarAsync<T>(context, sql)`** — a private helper over the same connection. Check `MigrationsSqlServerTest.cs` and `MigrationsTestBase` for existing equivalents first and reuse them if they exist; add these two privately in `MigrationsSqlServerTest.TemporalTables.cs` if they do not.
 
 Step 4 of the test is the whole point of the feature: **failed-login churn on the fragment produces no history rows.** If that assertion fails, the feature does not deliver its use case regardless of what the DDL looks like.
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj`
-Expected: FAIL initially — most likely on helper names or on the exact history table name. Fix those, and confirm the *assertions* are what finally pass.
+Run: `./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj --filter-method '*Split_columns_out_of_populated_temporal_table_preserves_current_data'`
+Expected: FAIL initially — most likely on helper names, on the `SYSTEM_VERSIONING` wrapping around the generated `DropColumn` operations, or on the ordering assertion. Fix those, and confirm the *assertions* in steps 3 and 4 are what finally pass.
 
 - [ ] **Step 3: Write the backfill recipe doc**
 
@@ -4121,12 +4398,31 @@ FROM [Users] FOR SYSTEM_TIME AS OF '2024-01-01T00:00:00.0000000' AS [u]
 """);
     }
 
-    [ConditionalFact]
-    public async Task All_with_root_projection_is_single_table()
+    // Five temporal operators, five distinct public entry points, each building its own query-root
+    // expression (src/EFCore.SqlServer/Extensions/SqlServerDbSetExtensions.cs:34, :79, :126, :173,
+    // :206). Testing AsOf and All only would leave three of them unexercised.
+    private static IQueryable<User> Temporal(TemporalSplitEntityContext context, string op)
+        => op switch
+        {
+            "AsOf" => context.Users.TemporalAsOf(PointInTime),
+            "FromTo" => context.Users.TemporalFromTo(PointInTime, PointInTime.AddYears(1)),
+            "Between" => context.Users.TemporalBetween(PointInTime, PointInTime.AddYears(1)),
+            "ContainedIn" => context.Users.TemporalContainedIn(PointInTime, PointInTime.AddYears(1)),
+            "All" => context.Users.TemporalAll(),
+            _ => throw new ArgumentOutOfRangeException(nameof(op)),
+        };
+
+    [ConditionalTheory]
+    [InlineData("AsOf")]
+    [InlineData("FromTo")]
+    [InlineData("Between")]
+    [InlineData("ContainedIn")]
+    [InlineData("All")]
+    public async Task Every_temporal_operator_with_a_root_projection_is_single_table(string op)
     {
         await using var context = fixture.CreateContext();
 
-        _ = await context.Users.TemporalAll().Select(u => u.Email).ToListAsync();
+        _ = await Temporal(context, op).Select(u => u.Email).ToListAsync();
 
         AssertSql();
     }
@@ -4223,7 +4519,7 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
     [InlineData("ordering")]
     [InlineData("grouping")]
     [InlineData("materialization")]
-    [InlineData("tracking")]
+    [InlineData("join")]
     [InlineData("correlated_subquery")]
     [InlineData("set_operation")]
     public async Task Fragment_dependent_shapes_are_rejected_with_the_guided_error(string shape)
@@ -4238,8 +4534,10 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
                 "predicate" => temporal.Where(u => u.AccessFailedCount > 0).Select(u => u.Email).ToListAsync(),
                 "ordering" => temporal.OrderBy(u => u.PasswordHash).Select(u => u.Email).ToListAsync(),
                 "grouping" => temporal.GroupBy(u => u.PasswordHash).Select(g => g.Key).ToListAsync(),
-                "materialization" => temporal.AsNoTracking().ToListAsync(),
-                "tracking" => temporal.ToListAsync(),
+                "materialization" => temporal.ToListAsync(),
+                "join" => temporal
+                    .Join(context.Users, o => o.Id, i => i.Id, (o, i) => o.PasswordHash)
+                    .ToListAsync(),
                 "correlated_subquery" => context.Users
                     .Select(u => temporal.Where(t => t.PasswordHash == u.PasswordHash).Count())
                     .ToListAsync(),
@@ -4251,6 +4549,42 @@ The period property name in the last test is whatever `SqlServerTemporalConventi
         // Every shape reduces to the same dependency test — no shape-specific code, one error.
         Assert.Contains("UserLockout", message);
         Assert.Contains("Users", message);
+    }
+```
+
+**There is no separate "tracking" arm, deliberately.** Every temporal operator applies `AsNoTracking()` to the query it returns (`src/EFCore.SqlServer/Extensions/SqlServerDbSetExtensions.cs:43` and the four siblings), so `temporal.ToListAsync()` and `temporal.AsNoTracking().ToListAsync()` are the same query — an earlier draft of this matrix listed both and tested one shape twice while reporting two. The `join` arm replaces it with a genuinely distinct shape: a fragment column referenced from the *outer* side of a join, where the fragment table has to survive pruning through a join tree rather than a flat select.
+
+Add one non-matrix assertion recording the no-tracking behaviour explicitly, so the removal above is documented in code rather than only here:
+
+```csharp
+    [ConditionalFact]
+    public async Task Temporal_operators_never_track()
+    {
+        await using var context = fixture.CreateContext();
+
+        _ = await context.Users.TemporalAsOf(PointInTime).Select(u => u.Email).ToListAsync();
+
+        Assert.Empty(context.ChangeTracker.Entries());
+    }
+```
+
+Also run the rejection path across all five operators, not just `AsOf`, to prove the guided error is not operator-specific:
+
+```csharp
+    [ConditionalTheory]
+    [InlineData("AsOf")]
+    [InlineData("FromTo")]
+    [InlineData("Between")]
+    [InlineData("ContainedIn")]
+    [InlineData("All")]
+    public async Task Fragment_projection_is_rejected_under_every_temporal_operator(string op)
+    {
+        await using var context = fixture.CreateContext();
+
+        var message = (await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Temporal(context, op).Select(u => u.PasswordHash).ToListAsync())).Message;
+
+        Assert.Contains("UserLockout", message);
     }
 ```
 
@@ -4289,14 +4623,32 @@ Add `public ICollection<Login> Logins { get; set; } = [];` and `public Address A
 The owned type shares the principal table, so it exercises the Task A3 reader's multi-mapping consensus path through the query pipeline.
 
 ```csharp
+    // An Include followed by a projection is discarded by EF, so a test written that way proves
+    // nothing about Include at all — it only tests the projection. These two split the question:
+    // the Include test materializes, the pruning test never mentions Include.
     [ConditionalFact]
-    public async Task Include_of_a_root_mapped_navigation_prunes_the_fragment_join()
+    public async Task Include_of_a_root_mapped_navigation_is_rejected()
+    {
+        await using var context = fixture.CreateContext();
+
+        // Include forces full materialization of the root entity, which reads the fragment
+        // columns. Rejection is the correct outcome here, not pruning.
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => context.Users
+                .TemporalAsOf(PointInTime)
+                .Include(u => u.Logins)
+                .ToListAsync());
+
+        Assert.Contains("UserLockout", exception.Message);
+    }
+
+    [ConditionalFact]
+    public async Task Navigation_projection_over_root_members_prunes_the_fragment_join()
     {
         await using var context = fixture.CreateContext();
 
         _ = await context.Users
             .TemporalAsOf(PointInTime)
-            .Include(u => u.Logins)
             .Select(u => new { u.Email, Logins = u.Logins.Select(l => l.At) })
             .ToListAsync();
 
@@ -4304,14 +4656,13 @@ The owned type shares the principal table, so it exercises the Task A3 reader's 
     }
 
     [ConditionalFact]
-    public async Task Include_combined_with_a_fragment_member_is_rejected()
+    public async Task Navigation_projection_combined_with_a_fragment_member_is_rejected()
     {
         await using var context = fixture.CreateContext();
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => context.Users
                 .TemporalAsOf(PointInTime)
-                .Include(u => u.Logins)
                 .Select(u => new { u.PasswordHash, Logins = u.Logins.Select(l => l.At) })
                 .ToListAsync());
 
@@ -4345,7 +4696,9 @@ The owned type shares the principal table, so it exercises the Task A3 reader's 
 }
 ```
 
-On the two `Include` tests: if navigation expansion throws `TemporalNavigationExpansionBetweenTemporalAndNonTemporal` **before** the postprocessor runs, that is an acceptable outcome — assert that message instead and record the behaviour in the PR description. What is *not* acceptable is an internal exception with no guided message.
+On the navigation tests: if navigation expansion throws `TemporalNavigationExpansionBetweenTemporalAndNonTemporal` **before** the postprocessor runs, that is an acceptable outcome — assert that message instead and record the behaviour in the PR description. What is *not* acceptable is an internal exception with no guided message.
+
+`Include_of_a_root_mapped_navigation_is_rejected` is the one to watch: if it turns out that a temporal `Include` is rejected for an unrelated reason (temporal/non-temporal navigation expansion) rather than by the Task A11 survivor check, the test still passes but stops covering A11. Assert on which message actually arrives and say so in the test name if it changes.
 
 The compiled-query test stays skipped: `EF.CompileQuery` plus any temporal operator fails for **all** temporal entities, split or not, with `ArgumentException` in `ExpressionTreeFuncletizer.VisitMethodCall` — Spike 1 confirmed it against a non-split control entity, so it is not a regression in this feature. Task A14 files the upstream bug; update the `Skip` reason with the issue number once it has one.
 
@@ -4395,7 +4748,7 @@ Spec §3.1 constrains the tier-1 public surface to exactly two things: the fragm
 Run: `./build.sh --test --projects $PWD/test/EFCore.SqlServer.FunctionalTests/EFCore.SqlServer.FunctionalTests.csproj --filter-class '*SqlServerApiConsistencyTest'`
 Expected: FAIL, listing every public member added in Tasks A1 and A2 as missing from the baseline.
 
-**Read that list carefully.** It should contain exactly nine members — four fragment extensions and five builder overloads (`SplitTableBuilder`, `SplitTableBuilder<TEntity>`, `OwnedNavigationSplitTableBuilder`, `OwnedNavigationSplitTableBuilder<,>`, and any generic/non-generic pair the compiler emits separately). Anything else in that list is an accidental public API — make it internal before continuing.
+**Read that list carefully.** It should contain exactly eight members — four fragment extensions and one `IsTemporal` overload per split-table builder type (`SplitTableBuilder`, `SplitTableBuilder<TEntity>`, `OwnedNavigationSplitTableBuilder`, `OwnedNavigationSplitTableBuilder<TOwnerEntity, TDependentEntity>`). That is exactly the eight `Member` entries added in Steps 2 and 3 below; if the counts disagree, the discrepancy is real and needs explaining, not padding. Anything else in that list is an accidental public API — make it internal before continuing.
 
 - [ ] **Step 2: Add the fragment extensions to the baseline**
 
@@ -4579,3 +4932,29 @@ Checked after writing, per the writing-plans skill:
 2. **Shared-constraint conflict resolution** (Task B9): conflicting overrides on a deduplicated constraint are a validation error rather than last-writer-wins. Spike 2 recorded this as undesigned.
 
 **One hypothesis this plan can falsify.** Task A8 is the acceptance gate for spec §3.3's "zero generator changes" claim. The plan instructs the implementer to expand the work and report the finding rather than weaken the test — which is the honest handling of a hypothesis the spec itself labels untested.
+
+---
+
+## Review round 1 — 2026-08-22
+
+An external review of the first draft raised ten findings against `main` at `2965e616bf`. Nine were correct as stated and are fixed above; one was half right. Recorded here because several of them were plausible-looking mistakes that would have survived into code.
+
+**Fixed as reported:**
+
+| # | Task | Defect | Fix |
+|---|---|---|---|
+| 1 | B1 | The precedence test asserted against the metadata setter, which in the precedent overwrites unconditionally (`RelationalPropertyOverrides.cs:188`); precedence is enforced by the builder's `CanSetColumnName`. The plan's own prose stated the opposite. | Test routed through `overrides.Builder`; prose corrected; a second assertion now pins the setter's real (overwriting) semantics. |
+| 3 | B6 | Instructed adding store-object overloads to `IConventionKeyBuilder`/`IConventionForeignKeyBuilder`, which live in the **Core** assembly while `StoreObjectIdentifier` is Relational. The named file does not exist. | Moved to extension methods on `RelationalKeyBuilderExtensions`/`RelationalForeignKeyBuilderExtensions`, matching the existing `HasName(this IConventionKeyBuilder, …)` at `:61`. |
+| 4 | A9 | The test awaited `Test(...)`, which cleans the store in `finally` (`MigrationsTestBase.cs:3616`), then inserted into a dropped table — and proved an edited migration using hand-written DDL. | Rewritten to own create → seed → diff → splice `SqlOperation` → execute → verify in one scope, with the backfill spliced into differ output. |
+| 5 | B9 | The conflict test's model has no identifying relationship, so `IncompatibleTableNoRelationship` (`:1187`) fires first; and `ValidateSharedForeignKeysCompatibility` buckets by resolved name (`:1829`), so two different overrides never meet. | Model given an identifying relationship plus a premise assertion; detection moved to a new `ValidateSharedForeignKeyNameOverrides` with name-independent structural bucketing. |
+| 6 | A3/A5 | A5 promised hidden-state consensus and checked only column names; A3's `FindTemporalEntityType` claimed to prefer roots but returned the first qualifying mapping. Together: order-dependent migrations. | Hidden-state comparison, resource string and test added to A5; A3 given an explicit root-then-ordinal-name preference. |
+| 7 | B8 | Asserted `Contains` on generated text — no compile, no rebuild, no diff — for a newly invented `StoreObjectPair` literal. | Switched to `CSharpMigrationsGeneratorTestBase.Test` (`:37`), which compiles the snapshot and asserts an empty diff; explicit-null case added. |
+| 8 | B7 | Ran `EFCore.Relational.Tests`, which has no concrete `CompiledModelRelationalTestBase` subclass, so the test would never execute. | Runs `CompiledModelSqlServerTest` and `CompiledModelSqliteTest`; a zero-executed count is now called out as the failure mode to watch. |
+| 9 | A12 | Covered two of five temporal operators; the "materialization" and "tracking" arms were the same query, since every operator applies `AsNoTracking()` (`SqlServerDbSetExtensions.cs:43`); both `Include` tests projected, which discards the `Include`. | All five operators covered (success and rejection); `tracking` replaced by a `join` shape plus an explicit no-tracking assertion; `Include` and navigation-projection tests separated. |
+| 10 | A8/A13 | A8 called a snapshot-vs-runtime diff "compiled model diffing"; A13 said "exactly nine members" then listed eight. | Both corrected, with A13 now tying the count to the entries it actually adds. |
+
+**Half right — finding 2 (B5).** The reported test defect is real and fixed: repeating `HasKey(c => c.Id)` returns the existing key (`InternalEntityTypeBuilder.cs:267`, `:325`), so the survival test could pass with no machinery at all. It now forces a real re-creation via base-type assignment.
+
+The accompanying claim — that `IKeyAddedConvention` cannot work because `Attach` merges annotations *after* creating the key — does not hold, and the proposed redesign around annotation-changed processing was not adopted. `InternalPropertyBuilder.Attach` (`:828`) has the identical create-then-merge ordering, and `PropertyOverridesConvention` ships on exactly this mechanism, covered by `RelationalModelBuilderTest.cs:1323`. What makes it correct is the delayed convention scope: `Attach` call sites run inside `Model.DelayConventions()`, and `OnKeyAdded` replays after the batch closes. The plan keeps the convention and adds Step 4b — an audit of the three key-attach call sites — with the explicit fallback of moving the re-attach into `InternalKeyBuilder.Attach` if any path turns out not to be delayed.
+
+**Not changed:** the two decisions listed under Self-review notes. B9's conflict resolution is still an error rather than last-writer-wins; only its detection mechanism changed.
