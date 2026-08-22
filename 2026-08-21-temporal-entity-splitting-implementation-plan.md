@@ -4676,15 +4676,29 @@ These depend on three additions from Step 4, so place them there or move the add
 
 - the `Login` type and its mapping;
 - `public DbSet<Login> Logins => Set<Login>();` on `TemporalSplitEntityContext`;
-- a fixture seed, since `SharedStoreFixtureBase<TContext>` seeds nothing by default (`test/EFCore.Specification.Tests/SharedStoreFixtureBase.cs:103`):
+- a fixture seed, since `SharedStoreFixtureBase<TContext>` seeds nothing by default (`test/EFCore.Specification.Tests/SharedStoreFixtureBase.cs:103`).
+
+  **Seed the whole graph, not a bare `Login`.** `Login.UserId` is a non-nullable `int` and `User.Logins` is a collection, so convention infers a *required* relationship; inserting a `Login` on its own leaves `UserId == 0` with no matching row and `SaveChangesAsync` fails on the database foreign key before any test in this task runs. `User.Address` is a required owned reference for the same reason and must be populated too:
 
 ```csharp
     protected override async Task SeedAsync(TemporalSplitEntityContext context)
     {
-        context.Logins.Add(new Login { At = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc) });
+        var user = new User
+        {
+            Email = "a@example.com",
+            Phone = "555-0100",
+            PasswordHash = "hash",
+            Address = new Address { City = "Redmond", PostalCode = "98052" }
+        };
+
+        user.Logins.Add(new Login { At = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc) });
+
+        context.Users.Add(user);
         await context.SaveChangesAsync();
     }
 ```
+
+  The seeded `User` writes to both `Users` and the non-temporal `UserLockout` fragment through the existing split-entity save path — that is expected and untouched by this work (spec §3.4, "SaveChanges untouched"). It changes nothing for the SQL-asserting tests, which do not read results.
 
 If the second `NotEmpty` fails against a seeded, non-empty result, the temporal API really does prevent a later `AsTracking()` override; that is a finding worth reporting upstream, not a reason to delete the assertion.
 
@@ -5108,3 +5122,14 @@ Two residual defects from the round-2 fixes; the `ConstraintStructure` comparer 
 **2. B5 — the foreign-key audit was still incomplete, and its grep could not regenerate the list (low).** Two survival paths were missing: `InternalEntityTypeBuilder.cs:132` (`DetachRelationship(referencingForeignKey).Attach()`) and `InternalTypeBaseBuilder.cs:1421`. Both are enclosed by delayed scopes — `:100` and `:1393` respectively — so they add two more confirmations rather than a counterexample. The grep missed the first because it keyed on receiver names (`detachedRelationship.Attach`) while that call attaches straight off the expression that produced the snapshot; it now searches `\.Attach(` and says why.
 
 Four chains are now confirmed delayed across three passes with no counterexample, which is the strongest evidence yet for the convention design — the remaining `verify` rows are completion, not doubt.
+
+
+---
+
+## Review round 4 — 2026-08-22
+
+One blocker, and it held.
+
+**A12 — the round-3 seed violated the inferred foreign key (medium).** `Login.UserId` is a non-nullable `int` and `User.Logins` is a collection, so convention infers a required relationship; seeding a bare `new Login { At = ... }` leaves `UserId == 0` with no matching row, and `SaveChangesAsync` fails on the database foreign key before any test in the task runs. `User.Address` is a required owned reference with the same problem. Fixed by seeding the complete graph — a `User` with `Email`, `Phone`, `PasswordHash`, an `Address`, and the `Login` attached through the navigation — with a note recording that the insert legitimately writes through the split-entity save path into both `Users` and `UserLockout`.
+
+That closes the fixture: three successive fixes to this one test each removed a different way for it to be vacuous or broken — no rows, no query that could see them, and finally no valid graph to insert. It is worth stating what the test is for, since the shape has now churned: it is the *control* proving temporal queries default to no-tracking and that a later `AsTracking()` overrides them. If it ever needs changing again, keep `Assert.NotEmpty(logins)` — that guard is what makes the two tracking assertions mean anything.
