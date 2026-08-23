@@ -84,6 +84,20 @@ public static class RelationalKeyBuilderExtensions
         => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name, storeObject);
 
     /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object key constraint override,
+    ///     such as an annotation that applies only to that table, without necessarily also configuring
+    ///     the name for that table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to configure the key constraint override for the table.</returns>
+    public static KeyOverridesBuilder HasOverrides(this KeyBuilder keyBuilder, in StoreObjectIdentifier storeObject)
+        => new(RelationalKeyOverrides.GetOrCreate(keyBuilder.Metadata, storeObject, ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the name of the key constraint in the database when targeting a relational database.
     /// </summary>
     /// <remarks>

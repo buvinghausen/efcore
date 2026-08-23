@@ -835,13 +835,14 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
         var annotations = GetAnnotations(key);
         GetAnnotationCalls(key, annotations, out var chainedCall, out var typeQualifiedCalls);
 
-        // Per-store-object name overrides are always emitted as their own statement(s) against a
+        // Per-store-object overrides are always emitted as their own statement(s) against a
         // stable "key" receiver (see GenerateKeyOverrides), independent of whether a type-qualified
         // annotation (e.g. SqlServerKeyBuilderExtensions.HasFillFactor/IsClustered) already forced
         // one: chaining .HasName(...) directly onto ".HasKey(...)" is only safe when nothing else
         // introduces a "var key = " assignment, since that leaves the initiating statement
-        // unterminated until GenerateAnnotations below closes it.
-        var hasKeyOverrides = key.GetOverrides().Any(o => o.IsNameOverridden);
+        // unterminated until GenerateAnnotations below closes it. Gated on any override existing at
+        // all, not just a name override: an override may exist solely to carry a provider annotation.
+        var hasKeyOverrides = key.GetOverrides().Any();
         var keyBuilderName = AppendChainedBuilderHeader("key", parameters, typeQualifiedCalls, forceLocal: hasKeyOverrides);
         var stringBuilder = parameters.StringBuilder;
 
@@ -864,7 +865,8 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
     }
 
     /// <summary>
-    ///     Generates code for per-store-object key constraint name overrides.
+    ///     Generates code for per-store-object key constraint overrides, including overrides whose
+    ///     name facet is unset -- an override may exist solely to carry a provider annotation.
     /// </summary>
     /// <param name="keyBuilderName">
     ///     The name of the builder variable. Always a real, already-initialized local variable
@@ -881,20 +883,53 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
     {
         foreach (var overrides in key.GetOverrides())
         {
-            if (!overrides.IsNameOverridden)
+            if (overrides.IsNameOverridden)
             {
-                continue;
+                stringBuilder
+                    .AppendLine()
+                    .Append(keyBuilderName)
+                    .Append(".HasName(")
+                    .Append(Code.Literal(overrides.Name))
+                    .Append(", ");
+                AppendStoreObjectIdentifierLiteral(overrides.StoreObject, stringBuilder);
+                stringBuilder.AppendLine(");");
             }
 
-            stringBuilder
-                .AppendLine()
-                .Append(keyBuilderName)
-                .Append(".HasName(")
-                .Append(Code.Literal(overrides.Name))
-                .Append(", ");
-            AppendStoreObjectIdentifierLiteral(overrides.StoreObject, stringBuilder);
-            stringBuilder.AppendLine(");");
+            // Chaining annotations onto keyBuilderName (a KeyBuilder) directly above would set
+            // them on the key itself, not this override -- KeyBuilder.HasAnnotation(name, value)
+            // already exists for the key, so a per-store-object annotation needs the dedicated
+            // KeyOverridesBuilder from HasOverrides(storeObject), matching how property overrides
+            // route through the table-scoped ColumnBuilder rather than the property builder.
+            GenerateKeyOverridesAnnotations(keyBuilderName, overrides, stringBuilder);
         }
+    }
+
+    /// <summary>
+    ///     Generates code for the annotations on a per-store-object key constraint override.
+    /// </summary>
+    /// <param name="keyBuilderName">The name of the key builder variable.</param>
+    /// <param name="overrides">The override.</param>
+    /// <param name="stringBuilder">The builder code is added to.</param>
+    protected virtual void GenerateKeyOverridesAnnotations(
+        string keyBuilderName,
+        IRelationalKeyOverrides overrides,
+        IndentedStringBuilder stringBuilder)
+    {
+        var annotations = GetAnnotations(overrides);
+        if (annotations.Count == 0)
+        {
+            return;
+        }
+
+        var overridesBuilderName = $"{keyBuilderName}.HasOverrides({StoreObjectIdentifierLiteral(overrides.StoreObject)})";
+        stringBuilder
+            .AppendLine()
+            .Append(overridesBuilderName);
+
+        // Note that GenerateAnnotations below does the corresponding decrement
+        stringBuilder.IncrementIndent();
+
+        GenerateAnnotations(overridesBuilderName, overrides, stringBuilder, annotations, inChainedCall: true);
     }
 
     /// <summary>
@@ -1865,6 +1900,117 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
         GenerateForeignKeyOverrides(foreignKey, stringBuilder);
 
         GenerateForeignKeyAnnotations(foreignKeyBuilderName, foreignKey, stringBuilder);
+
+        // A separate step, after the statement built above is closed and terminated by
+        // GenerateForeignKeyAnnotations: see the remarks on GenerateForeignKeyOverridesAnnotations
+        // for why override annotations cannot be chained into that same statement, and on
+        // GetForeignKeyExpression for why foreignKeyBuilderName itself is not reused here.
+        GenerateForeignKeyOverridesAnnotations(GetForeignKeyExpression(entityTypeBuilderName, foreignKey), foreignKey, stringBuilder);
+    }
+
+    /// <summary>
+    ///     Returns the full relationship-configuring expression for a foreign key -- equivalent to,
+    ///     but computed independently of, the statement <see cref="GenerateForeignKey" /> writes to
+    ///     its <see cref="IndentedStringBuilder" /> argument (<c>HasOne/WithOwner</c> followed by
+    ///     <c>WithOne/WithMany</c> and <c>HasForeignKey</c>, plus <c>HasPrincipalKey</c> when the
+    ///     principal key is non-default).
+    /// </summary>
+    /// <remarks>
+    ///     <see cref="GenerateForeignKey" />'s own <c>foreignKeyBuilderName</c> local captures only
+    ///     the leading <c>HasOne(...)</c>/<c>WithOwner(...)</c> call -- a <see cref="ReferenceNavigationBuilder" />,
+    ///     which has no <c>HasOverrides</c> overload -- because the rest of that statement is written
+    ///     directly to the shared <see cref="IndentedStringBuilder" /> rather than accumulated in a
+    ///     reusable string. <see cref="GenerateForeignKeyOverridesAnnotations" /> needs a full,
+    ///     independently re-evaluable expression that resolves to the same
+    ///     <see cref="ReferenceCollectionBuilder" />/<see cref="ReferenceReferenceBuilder" />/
+    ///     <see cref="OwnershipBuilder" /> the main statement configures, so it is
+    ///     recomputed here rather than reusing that local. Doing so is safe: <c>HasOne(...)</c>
+    ///     followed by <c>WithOne/WithMany(...).HasForeignKey(...)</c> is the same idempotent lookup
+    ///     used to resolve this foreign key wherever it needs re-resolving (see the reused-relationship
+    ///     tests in <c>RelationalForeignKeyOverridesTest</c>), so evaluating it a second time returns
+    ///     the identical foreign key rather than creating or reconfiguring a different one.
+    /// </remarks>
+    /// <param name="entityTypeBuilderName">The name of the entity type builder variable.</param>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <returns>The relationship-configuring expression, as C# source text.</returns>
+    protected virtual string GetForeignKeyExpression(string entityTypeBuilderName, IForeignKey foreignKey)
+    {
+        var expression = new StringBuilder();
+
+        if (foreignKey.IsOwnership)
+        {
+            expression
+                .Append(entityTypeBuilderName)
+                .Append(".WithOwner(");
+
+            if (foreignKey.DependentToPrincipal != null)
+            {
+                expression.Append(Code.Literal(foreignKey.DependentToPrincipal.Name));
+            }
+
+            expression.Append(')');
+
+            return expression.ToString();
+        }
+
+        expression
+            .Append(entityTypeBuilderName)
+            .Append(".HasOne(")
+            .Append(Code.Literal(GetFullName(foreignKey.PrincipalEntityType)))
+            .Append(", ")
+            .Append(Code.Literal(foreignKey.DependentToPrincipal?.Name))
+            .Append(')');
+
+        if (foreignKey.IsUnique)
+        {
+            expression.Append(".WithOne(");
+
+            if (foreignKey.PrincipalToDependent != null)
+            {
+                expression.Append(Code.Literal(foreignKey.PrincipalToDependent.Name));
+            }
+
+            expression
+                .Append(").HasForeignKey(")
+                .Append(Code.Literal(GetFullName(foreignKey.DeclaringEntityType)))
+                .Append(", ")
+                .Append(string.Join(", ", foreignKey.Properties.Select(p => Code.Literal(p.Name))))
+                .Append(')');
+
+            if (foreignKey.PrincipalKey != foreignKey.PrincipalEntityType.FindPrimaryKey())
+            {
+                expression
+                    .Append(".HasPrincipalKey(")
+                    .Append(Code.Literal(GetFullName(foreignKey.PrincipalEntityType)))
+                    .Append(", ")
+                    .Append(string.Join(", ", foreignKey.PrincipalKey.Properties.Select(p => Code.Literal(p.Name))))
+                    .Append(')');
+            }
+
+            return expression.ToString();
+        }
+
+        expression.Append(".WithMany(");
+
+        if (foreignKey.PrincipalToDependent != null)
+        {
+            expression.Append(Code.Literal(foreignKey.PrincipalToDependent.Name));
+        }
+
+        expression
+            .Append(").HasForeignKey(")
+            .Append(string.Join(", ", foreignKey.Properties.Select(p => Code.Literal(p.Name))))
+            .Append(')');
+
+        if (foreignKey.PrincipalKey != foreignKey.PrincipalEntityType.FindPrimaryKey())
+        {
+            expression
+                .Append(".HasPrincipalKey(")
+                .Append(string.Join(", ", foreignKey.PrincipalKey.Properties.Select(p => Code.Literal(p.Name))))
+                .Append(')');
+        }
+
+        return expression.ToString();
     }
 
     /// <summary>
@@ -1892,6 +2038,57 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
             stringBuilder.Append(", ");
             AppendStoreObjectIdentifierLiteral(overrides.StoreObjects.PrincipalStoreObject, stringBuilder);
             stringBuilder.Append(")");
+        }
+    }
+
+    /// <summary>
+    ///     Generates code for the annotations on per-store-object foreign key constraint overrides,
+    ///     including overrides whose name facet is unset -- an override may exist solely to carry a
+    ///     provider annotation.
+    /// </summary>
+    /// <remarks>
+    ///     Emitted as separate statement(s) against <paramref name="foreignKeyExpression" /> rather
+    ///     than chained into <see cref="GenerateForeignKeyOverrides" />'s statement: chaining an
+    ///     annotation there would land on whichever relationship builder type
+    ///     <c>.HasConstraintName(...)</c> returns (setting it on the relationship itself, since that
+    ///     type's own <c>HasAnnotation(string, object?)</c> already exists for that purpose), not on
+    ///     this override. A per-store-object annotation needs the dedicated
+    ///     <see cref="Microsoft.EntityFrameworkCore.Metadata.Builders.ForeignKeyOverridesBuilder" />
+    ///     returned by <c>HasOverrides(dependent, principal)</c>, matching how property overrides route
+    ///     through the table-scoped <see cref="ColumnBuilder" /> rather than the property builder. See
+    ///     <see cref="GetForeignKeyExpression" /> for why a full, independently re-evaluable expression
+    ///     is needed here rather than <see cref="GenerateForeignKey" />'s own
+    ///     <c>foreignKeyBuilderName</c> local.
+    /// </remarks>
+    /// <param name="foreignKeyExpression">
+    ///     The full relationship-configuring expression, as returned by <see cref="GetForeignKeyExpression" />.
+    /// </param>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="stringBuilder">The builder code is added to.</param>
+    protected virtual void GenerateForeignKeyOverridesAnnotations(
+        string foreignKeyExpression,
+        IForeignKey foreignKey,
+        IndentedStringBuilder stringBuilder)
+    {
+        foreach (var overrides in foreignKey.GetOverrides())
+        {
+            var annotations = GetAnnotations(overrides);
+            if (annotations.Count == 0)
+            {
+                continue;
+            }
+
+            var overridesBuilderName = $"{foreignKeyExpression}.HasOverrides("
+                + $"{StoreObjectIdentifierLiteral(overrides.StoreObjects.DependentStoreObject)}, "
+                + $"{StoreObjectIdentifierLiteral(overrides.StoreObjects.PrincipalStoreObject)})";
+            stringBuilder
+                .AppendLine()
+                .Append(overridesBuilderName);
+
+            // Note that GenerateAnnotations below does the corresponding decrement
+            stringBuilder.IncrementIndent();
+
+            GenerateAnnotations(overridesBuilderName, overrides, stringBuilder, annotations, inChainedCall: true);
         }
     }
 
@@ -2319,6 +2516,19 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
     ///     Appends a literal expression that constructs the given <see cref="StoreObjectIdentifier" />. The type is
     ///     always fully qualified since the generated snapshot's usings are not tracked by this generator.
     /// </summary>
+    /// <summary>
+    ///     Returns a literal expression that constructs the given <see cref="StoreObjectIdentifier" />, for use
+    ///     inline within a larger interpolated receiver expression (see <see cref="GenerateKeyOverridesAnnotations" />
+    ///     and <see cref="GenerateForeignKeyOverridesAnnotations" />), where the literal is needed as a string
+    ///     rather than appended directly to a builder.
+    /// </summary>
+    private string StoreObjectIdentifierLiteral(StoreObjectIdentifier storeObject)
+    {
+        var builder = new IndentedStringBuilder();
+        AppendStoreObjectIdentifierLiteral(storeObject, builder);
+        return builder.ToString();
+    }
+
     private void AppendStoreObjectIdentifierLiteral(StoreObjectIdentifier storeObject, IndentedStringBuilder stringBuilder)
     {
         stringBuilder.Append("Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.");

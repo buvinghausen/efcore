@@ -108,6 +108,26 @@ public static class RelationalForeignKeyBuilderExtensions
             name, storeObject, principalStoreObject);
 
     /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceCollectionBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this ReferenceCollectionBuilder referenceCollectionBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                referenceCollectionBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.
     /// </summary>
     /// <remarks>
@@ -200,6 +220,26 @@ public static class RelationalForeignKeyBuilderExtensions
             name, storeObject, principalStoreObject);
 
     /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceReferenceBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this ReferenceReferenceBuilder referenceReferenceBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                referenceReferenceBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.
     /// </summary>
     /// <remarks>
@@ -289,6 +329,26 @@ public static class RelationalForeignKeyBuilderExtensions
         where TDependentEntity : class
         => (OwnershipBuilder<TEntity, TDependentEntity>)((OwnershipBuilder)ownershipBuilder).HasConstraintName(
             name, storeObject, principalStoreObject);
+
+    /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="ownershipBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this OwnershipBuilder ownershipBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                ownershipBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
 
     /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.

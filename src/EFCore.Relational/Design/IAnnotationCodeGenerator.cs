@@ -417,6 +417,28 @@ public interface IAnnotationCodeGenerator
     ///     For the given annotations which have corresponding fluent API calls, returns those fluent API calls
     ///     and removes the annotations.
     /// </summary>
+    /// <param name="overrides">The key overrides to which the annotations are applied.</param>
+    /// <param name="annotations">The set of annotations from which to generate fluent API calls.</param>
+    IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
+        IRelationalKeyOverrides overrides,
+        IDictionary<string, IAnnotation> annotations)
+        => [];
+
+    /// <summary>
+    ///     For the given annotations which have corresponding fluent API calls, returns those fluent API calls
+    ///     and removes the annotations.
+    /// </summary>
+    /// <param name="overrides">The foreign key overrides to which the annotations are applied.</param>
+    /// <param name="annotations">The set of annotations from which to generate fluent API calls.</param>
+    IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
+        IRelationalForeignKeyOverrides overrides,
+        IDictionary<string, IAnnotation> annotations)
+        => [];
+
+    /// <summary>
+    ///     For the given annotations which have corresponding fluent API calls, returns those fluent API calls
+    ///     and removes the annotations.
+    /// </summary>
     /// <param name="sequence">The sequence to which the annotations are applied.</param>
     /// <param name="annotations">The set of annotations from which to generate fluent API calls.</param>
     IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
@@ -446,6 +468,8 @@ public interface IAnnotationCodeGenerator
             IProperty property => GenerateFluentApiCalls(property, annotations),
             IComplexProperty complexProperty => GenerateFluentApiCalls(complexProperty, annotations),
             IRelationalPropertyOverrides overrides => GenerateFluentApiCalls(overrides, annotations),
+            IRelationalKeyOverrides keyOverrides => GenerateFluentApiCalls(keyOverrides, annotations),
+            IRelationalForeignKeyOverrides foreignKeyOverrides => GenerateFluentApiCalls(foreignKeyOverrides, annotations),
             IKey key => GenerateFluentApiCalls(key, annotations),
             IForeignKey foreignKey => GenerateFluentApiCalls(foreignKey, annotations),
             INavigation navigation => GenerateFluentApiCalls(navigation, annotations),
