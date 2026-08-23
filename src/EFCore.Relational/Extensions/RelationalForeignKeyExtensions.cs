@@ -34,6 +34,19 @@ public static class RelationalForeignKeyExtensions
             return null;
         }
 
+        // Mirrors how the parameterless RelationalKeyExtensions.GetName() resolves through the
+        // store-object overload: without this, a per-table override configured only through
+        // GetConstraintName(dependent, principal) is invisible here, disagreeing with both that
+        // overload and the constraint actually created.
+        var storeObject = StoreObjectIdentifier.Create(foreignKey.DeclaringEntityType, StoreObjectType.Table);
+        var principalStoreObject = StoreObjectIdentifier.Create(foreignKey.PrincipalEntityType, StoreObjectType.Table);
+        if (storeObject.HasValue && principalStoreObject.HasValue)
+        {
+            return foreignKey.GetConstraintName(storeObject.Value, principalStoreObject.Value);
+        }
+
+        // Either table could not be determined (e.g. TPT/TPC or an unmapped principal): fall back
+        // to the original, non-override-aware resolution rather than throwing.
         var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
         return annotation != null
             ? (string?)annotation.Value
