@@ -80,17 +80,33 @@ public class KeyOverridesConvention : IKeyAnnotationChangedConvention
             overridesToReattach.Add(conventionOverrides);
         }
 
-        if (overridesToReattach == null)
+        if (overridesToReattach != null)
         {
-            return;
+            foreach (var overrides in overridesToReattach)
+            {
+                var removedOverrides = ((IMutableKey)key).RemoveOverrides(overrides.StoreObject);
+                if (removedOverrides != null)
+                {
+                    RelationalKeyOverrides.Attach(key, (IConventionRelationalKeyOverrides)removedOverrides);
+                }
+            }
         }
 
-        foreach (var overrides in overridesToReattach)
+        // MergeAnnotationsFrom (invoked by the Attach machinery documented above) replaces the
+        // reused key's entire KeyOverrides annotation with the detached key's dictionary, so any
+        // overrides that belonged exclusively to the reused key -- and are not also present in the
+        // incoming set handled above -- are gone from key.GetOverrides() by the time this
+        // convention runs, and are only recoverable from oldAnnotation. Merge them back in. On a
+        // same-store-object collision the incoming (already-reattached) entry wins, since it
+        // reflects what MergeAnnotationsFrom just wrote and is the caller's intent for the attach.
+        if (oldAnnotation?.Value is IReadOnlyStoreObjectDictionary<IConventionRelationalKeyOverrides> oldOverrides)
         {
-            var removedOverrides = ((IMutableKey)key).RemoveOverrides(overrides.StoreObject);
-            if (removedOverrides != null)
+            foreach (var overrides in oldOverrides.GetValues())
             {
-                RelationalKeyOverrides.Attach(key, (IConventionRelationalKeyOverrides)removedOverrides);
+                if (RelationalKeyOverrides.Find(key, overrides.StoreObject) == null)
+                {
+                    RelationalKeyOverrides.Attach(key, overrides);
+                }
             }
         }
     }

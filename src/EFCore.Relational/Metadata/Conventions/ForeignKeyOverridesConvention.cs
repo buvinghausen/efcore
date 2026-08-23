@@ -83,18 +83,35 @@ public class ForeignKeyOverridesConvention : IForeignKeyAnnotationChangedConvent
             overridesToReattach.Add(conventionOverrides);
         }
 
-        if (overridesToReattach == null)
+        if (overridesToReattach != null)
         {
-            return;
+            foreach (var overrides in overridesToReattach)
+            {
+                var removedOverrides = ((IMutableForeignKey)foreignKey).RemoveOverrides(
+                    overrides.StoreObjects.DependentStoreObject, overrides.StoreObjects.PrincipalStoreObject);
+                if (removedOverrides != null)
+                {
+                    RelationalForeignKeyOverrides.Attach(foreignKey, (IConventionRelationalForeignKeyOverrides)removedOverrides);
+                }
+            }
         }
 
-        foreach (var overrides in overridesToReattach)
+        // MergeAnnotationsFrom (invoked by the Attach machinery documented above) replaces the
+        // reused foreign key's entire ForeignKeyOverrides annotation with the detached foreign
+        // key's dictionary, so any overrides that belonged exclusively to the reused foreign key --
+        // and are not also present in the incoming set handled above -- are gone from
+        // foreignKey.GetOverrides() by the time this convention runs, and are only recoverable from
+        // oldAnnotation. Merge them back in. On a same-store-object-pair collision the incoming
+        // (already-reattached) entry wins, since it reflects what MergeAnnotationsFrom just wrote
+        // and is the caller's intent for the attach.
+        if (oldAnnotation?.Value is IReadOnlyStoreObjectPairDictionary<IConventionRelationalForeignKeyOverrides> oldOverrides)
         {
-            var removedOverrides = ((IMutableForeignKey)foreignKey).RemoveOverrides(
-                overrides.StoreObjects.DependentStoreObject, overrides.StoreObjects.PrincipalStoreObject);
-            if (removedOverrides != null)
+            foreach (var overrides in oldOverrides.GetValues())
             {
-                RelationalForeignKeyOverrides.Attach(foreignKey, (IConventionRelationalForeignKeyOverrides)removedOverrides);
+                if (RelationalForeignKeyOverrides.Find(foreignKey, overrides.StoreObjects) == null)
+                {
+                    RelationalForeignKeyOverrides.Attach(foreignKey, overrides);
+                }
             }
         }
     }
