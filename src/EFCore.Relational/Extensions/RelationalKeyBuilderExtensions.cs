@@ -3,6 +3,8 @@
 
 // ReSharper disable once CheckNamespace
 
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
+
 namespace Microsoft.EntityFrameworkCore;
 
 /// <summary>
@@ -172,7 +174,20 @@ public static class RelationalKeyBuilderExtensions
     {
         var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
 
-        return configurationSource.Overrides(keyBuilder.Metadata.GetNameConfigurationSource(storeObject))
-            || keyBuilder.Metadata.GetName(storeObject) == name;
+        if (configurationSource.Overrides(keyBuilder.Metadata.GetNameConfigurationSource(storeObject)))
+        {
+            return true;
+        }
+
+        // When an override already exists, its *stored* name is what a same-or-lower-source write
+        // must match -- not the resolved name. GetName(storeObject) resolves an explicit-null
+        // override to the default name, which would otherwise make a convention proposing that
+        // same default name indistinguishable from a real match, letting HasName silently replace
+        // "IsNameOverridden: true, Name: null" with a concrete value. When there is no override at
+        // all, there is no stored value to compare, so the resolved-name comparison is correct.
+        var overrides = RelationalKeyOverrides.Find(keyBuilder.Metadata, storeObject);
+        return overrides == null
+            ? keyBuilder.Metadata.GetName(storeObject) == name
+            : overrides.Name == name;
     }
 }

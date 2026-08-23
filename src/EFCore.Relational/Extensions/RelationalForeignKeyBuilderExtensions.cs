@@ -3,6 +3,8 @@
 
 // ReSharper disable once CheckNamespace
 
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
+
 namespace Microsoft.EntityFrameworkCore;
 
 /// <summary>
@@ -388,9 +390,20 @@ public static class RelationalForeignKeyBuilderExtensions
     {
         var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
 
-        return configurationSource.Overrides(
-                relationship.Metadata.GetConstraintNameConfigurationSource(storeObject, principalStoreObject))
-            || relationship.Metadata.GetConstraintName(storeObject, principalStoreObject) == name;
+        if (configurationSource.Overrides(
+                relationship.Metadata.GetConstraintNameConfigurationSource(storeObject, principalStoreObject)))
+        {
+            return true;
+        }
+
+        // See the identical comment in RelationalKeyBuilderExtensions.CanSetName: compare the
+        // stored override name, not the resolved one, or an explicit-null override gets silently
+        // clobbered by a lower-priority convention proposing the same default name.
+        var overrides = RelationalForeignKeyOverrides.Find(
+            relationship.Metadata, new StoreObjectPair(storeObject, principalStoreObject));
+        return overrides == null
+            ? relationship.Metadata.GetConstraintName(storeObject, principalStoreObject) == name
+            : overrides.Name == name;
     }
 
     /// <summary>
