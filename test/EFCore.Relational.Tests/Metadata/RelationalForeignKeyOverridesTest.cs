@@ -415,6 +415,26 @@ public class RelationalForeignKeyOverridesTest
         var extraFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrderExtra))!
             .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
 
+        // This test's whole point is the first-recorded candidate being the tricky case: a
+        // "compare only against the first recorded candidate" implementation must skip both
+        // comparisons to it and so never reach the real conflict between the other two. That only
+        // happens if SharedOrder's foreign key is genuinely first in the same enumeration the
+        // validator uses. Anchor that explicitly, rather than relying on it implicitly, so a future
+        // shift in enumeration order fails this assertion loudly instead of leaving the test green
+        // while it silently stops exercising the scenario.
+        //
+        // RelationalModelValidator enumerates via model.GetEntityTypes().SelectMany(e =>
+        // e.GetDeclaredForeignKeys()), and Model orders entity types by full CLR name
+        // (SortedDictionary<string, EntityType>, ordinal). "SharedOrder" sorts before
+        // "SharedOrderDetails" and "SharedOrderExtra" only because it is a strict prefix of both --
+        // an incidental consequence of these classes' names, not a promise the validator makes.
+        var orderedCustomerForeignKeys = modelBuilder.Model.GetEntityTypes()
+            .Where(e => e.GetTableName() == "Orders")
+            .SelectMany(e => e.GetDeclaredForeignKeys())
+            .Where(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer))
+            .ToList();
+        Assert.Same(orderFk, orderedCustomerForeignKeys[0]);
+
         // Sanity check the premise: the first-recorded candidate (SharedOrder's foreign key) is
         // genuinely incompatible with the other two, so a "compare only against the first
         // recorded candidate" implementation would skip both comparisons and never reach the real
