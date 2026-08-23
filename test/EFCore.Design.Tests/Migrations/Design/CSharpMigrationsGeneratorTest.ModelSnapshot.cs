@@ -9088,6 +9088,101 @@ partial class Snapshot : ModelSnapshot
             },
             fullSnapshot: false);
 
+    [Fact] // GetForeignKeyExpression's ownership branch: an annotation-only override was untested on an ownership foreign key
+    public void Snapshot_round_trips_annotation_only_foreign_key_override_on_ownership_foreign_key()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomerWithAddress>(b =>
+            {
+                b.ToTable("Customers");
+                b.OwnsOne(
+                    c => c.Address,
+                    a =>
+                    {
+                        a.ToTable("CustomerAddress");
+                        // No name at all -- exercises GetForeignKeyExpression's WithOwner-only
+                        // (ownership) branch via an override that carries only an annotation.
+                        a.WithOwner()
+                            .HasOverrides(
+                                StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                                StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                            .HasAnnotation("Test:Comment", "note");
+                    });
+            }),
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var ownedEntityType = model.FindEntityType(typeof(OverridesCustomerWithAddress))!
+                    .FindNavigation(nameof(OverridesCustomerWithAddress.Address))!.TargetEntityType;
+                var foreignKey = ownedEntityType.GetForeignKeys().Single();
+
+                Assert.True(foreignKey.IsOwnership);
+
+                var overrides = foreignKey.GetOverrides().Single(
+                    o => o.StoreObjects == new StoreObjectPair(
+                        StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                        StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+
+                // No name at all, only the annotation -- this must not have been turned into an
+                // explicit-null name override by the round trip.
+                Assert.False(overrides.IsNameOverridden);
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
+    [Fact] // GetForeignKeyExpression: two foreign keys from the same dependent entity type to the
+           // same principal entity type -- the shape where re-resolving the recomputed
+           // HasOne/WithMany/HasForeignKey chain could bind the override to the wrong foreign key.
+    public void Snapshot_round_trips_foreign_key_override_when_two_foreign_keys_share_dependent_and_principal_types()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrderWithTwoCustomerLinks>(b =>
+                {
+                    b.ToTable("Orders");
+
+                    // Both relationships go from this same dependent entity type to this same
+                    // principal entity type, with no navigations on either side to tell them apart
+                    // -- only their foreign key properties differ. Only the shipping link carries a
+                    // name override and an annotation-only override; the billing link carries
+                    // neither, so a misresolution would show up as either landing on the wrong link.
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.BillingCustomerId);
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.ShippingCustomerId)
+                        .HasConstraintName(
+                            "fk_orders_customers_shipping",
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasOverrides(
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasAnnotation("Test:Comment", "shipping-note");
+                });
+            },
+            """.HasAnnotation("Test:Comment", "shipping-note")""",
+            model =>
+            {
+                var orders = StoreObjectIdentifier.Table("Orders", "DefaultSchema");
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+                var entityType = model.FindEntityType(typeof(OverridesOrderWithTwoCustomerLinks))!;
+
+                var foreignKeys = entityType.GetForeignKeys().ToList();
+                Assert.Equal(2, foreignKeys.Count);
+
+                var billingFk = foreignKeys.Single(
+                    fk => fk.Properties.Single().Name == nameof(OverridesOrderWithTwoCustomerLinks.BillingCustomerId));
+                var shippingFk = foreignKeys.Single(
+                    fk => fk.Properties.Single().Name == nameof(OverridesOrderWithTwoCustomerLinks.ShippingCustomerId));
+
+                // The override and its annotation must have landed on the shipping foreign key --
+                // the one actually configured -- and nowhere near the billing one.
+                Assert.Equal("fk_orders_customers_shipping", shippingFk.GetConstraintName(orders, customers));
+                var overrides = shippingFk.GetOverrides().Single(o => o.StoreObjects == new StoreObjectPair(orders, customers));
+                Assert.Equal("shipping-note", overrides.FindAnnotation("Test:Comment")!.Value);
+
+                Assert.Empty(billingFk.GetOverrides());
+            },
+            fullSnapshot: false);
+
     [Fact]
     public void Snapshot_does_not_emit_raw_key_or_foreign_key_override_annotations()
     {
@@ -9135,6 +9230,15 @@ partial class Snapshot : ModelSnapshot
         public int Id { get; set; }
 
         public int CustomerId { get; set; }
+    }
+
+    private class OverridesOrderWithTwoCustomerLinks
+    {
+        public int Id { get; set; }
+
+        public int BillingCustomerId { get; set; }
+
+        public int ShippingCustomerId { get; set; }
     }
 
     private class OverridesCustomerWithAddress

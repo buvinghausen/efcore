@@ -1911,24 +1911,47 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
     /// <summary>
     ///     Returns the full relationship-configuring expression for a foreign key -- equivalent to,
     ///     but computed independently of, the statement <see cref="GenerateForeignKey" /> writes to
-    ///     its <see cref="IndentedStringBuilder" /> argument (<c>HasOne/WithOwner</c> followed by
-    ///     <c>WithOne/WithMany</c> and <c>HasForeignKey</c>, plus <c>HasPrincipalKey</c> when the
-    ///     principal key is non-default).
+    ///     its <see cref="IndentedStringBuilder" /> argument, with one deliberate difference for
+    ///     ownership foreign keys. For a non-ownership foreign key this reproduces <c>HasOne</c>
+    ///     followed by <c>WithOne/WithMany</c> and <c>HasForeignKey</c>, plus <c>HasPrincipalKey</c>
+    ///     when the principal key is non-default. For an ownership foreign key it reproduces only the
+    ///     leading <c>WithOwner(...)</c> call, omitting the <c>HasForeignKey(...)</c>/
+    ///     <c>HasPrincipalKey(...)</c> that <see cref="GenerateForeignKey" />'s own statement still
+    ///     writes for ownership foreign keys -- see the remarks for why the shorter expression still
+    ///     resolves to the same foreign key.
     /// </summary>
     /// <remarks>
-    ///     <see cref="GenerateForeignKey" />'s own <c>foreignKeyBuilderName</c> local captures only
-    ///     the leading <c>HasOne(...)</c>/<c>WithOwner(...)</c> call -- a <see cref="ReferenceNavigationBuilder" />,
-    ///     which has no <c>HasOverrides</c> overload -- because the rest of that statement is written
-    ///     directly to the shared <see cref="IndentedStringBuilder" /> rather than accumulated in a
-    ///     reusable string. <see cref="GenerateForeignKeyOverridesAnnotations" /> needs a full,
-    ///     independently re-evaluable expression that resolves to the same
-    ///     <see cref="ReferenceCollectionBuilder" />/<see cref="ReferenceReferenceBuilder" />/
-    ///     <see cref="OwnershipBuilder" /> the main statement configures, so it is
-    ///     recomputed here rather than reusing that local. Doing so is safe: <c>HasOne(...)</c>
-    ///     followed by <c>WithOne/WithMany(...).HasForeignKey(...)</c> is the same idempotent lookup
-    ///     used to resolve this foreign key wherever it needs re-resolving (see the reused-relationship
-    ///     tests in <c>RelationalForeignKeyOverridesTest</c>), so evaluating it a second time returns
-    ///     the identical foreign key rather than creating or reconfiguring a different one.
+    ///     <para>
+    ///         <see cref="GenerateForeignKey" />'s own <c>foreignKeyBuilderName</c> local captures only
+    ///         the leading <c>HasOne(...)</c>/<c>WithOwner(...)</c> call -- a <see cref="ReferenceNavigationBuilder" />,
+    ///         which has no <c>HasOverrides</c> overload -- because the rest of that statement is written
+    ///         directly to the shared <see cref="IndentedStringBuilder" /> rather than accumulated in a
+    ///         reusable string. <see cref="GenerateForeignKeyOverridesAnnotations" /> needs a full,
+    ///         independently re-evaluable expression that resolves to the same
+    ///         <see cref="ReferenceCollectionBuilder" />/<see cref="ReferenceReferenceBuilder" />/
+    ///         <see cref="OwnershipBuilder" /> the main statement configures, so it is
+    ///         recomputed here rather than reusing that local.
+    ///     </para>
+    ///     <para>
+    ///         For a non-ownership foreign key, doing so is safe because <c>HasOne(...)</c> followed
+    ///         by <c>WithOne/WithMany(...).HasForeignKey(...)</c> is the same idempotent lookup used
+    ///         to resolve this foreign key wherever it needs re-resolving (see the reused-relationship
+    ///         tests in <c>RelationalForeignKeyOverridesTest</c>), so evaluating it a second time
+    ///         returns the identical foreign key rather than creating or reconfiguring a different
+    ///         one.
+    ///     </para>
+    ///     <para>
+    ///         For an ownership foreign key, <c>WithOwner(...)</c> alone is already unambiguous, so
+    ///         appending <c>HasForeignKey(...)</c>/<c>HasPrincipalKey(...)</c> would add nothing to
+    ///         resolve: an owned entity type has exactly one ownership relationship -- it is what
+    ///         makes the entity type "owned" in the first place -- so within the scope that
+    ///         <paramref name="entityTypeBuilderName" /> already identifies (that single owned entity
+    ///         type builder), <c>WithOwner(...)</c> has only one foreign key it could possibly
+    ///         resolve to. There is no second, structurally distinct ownership foreign key on the
+    ///         same builder for the longer form to disambiguate between, unlike the non-ownership
+    ///         case where a dependent entity type can have several foreign keys to the same principal
+    ///         entity type and <c>HasForeignKey(...)</c> is what tells them apart.
+    ///     </para>
     /// </remarks>
     /// <param name="entityTypeBuilderName">The name of the entity type builder variable.</param>
     /// <param name="foreignKey">The foreign key.</param>
