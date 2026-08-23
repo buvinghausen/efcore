@@ -1886,7 +1886,14 @@ public class RelationalModelValidator(
             return;
         }
 
-        var namesByStructure = new Dictionary<ConstraintStructure, (IForeignKey ForeignKey, string Name)>();
+        // Every candidate seen so far for a given structure is retained, not just the first: with
+        // three or more structurally identical foreign keys sharing a table, the first one recorded
+        // can be behaviorally incompatible (AreCompatible: false) with the second and third while
+        // the second and third are compatible *with each other* and carry a genuine conflicting
+        // override. Comparing only against a single retained "existing" entry per structure would
+        // miss that pair entirely -- both would be skipped as incompatible with the first and the
+        // real conflict between them would never be checked.
+        var namesByStructure = new Dictionary<ConstraintStructure, List<(IForeignKey ForeignKey, string Name)>>();
 
         // Local copy: an `in` parameter cannot be captured by the lambdas below.
         var dependentTable = table;
@@ -1921,37 +1928,46 @@ public class RelationalModelValidator(
                 foreignKey.PrincipalKey.Properties
                     .Select(pr => pr.GetColumnName(principalTableValue) ?? pr.Name).ToList());
 
-            if (!namesByStructure.TryGetValue(structure, out var existing))
+            if (!namesByStructure.TryGetValue(structure, out var candidates))
             {
-                namesByStructure[structure] = (foreignKey, name);
+                namesByStructure[structure] = [(foreignKey, name)];
                 continue;
             }
 
-            if (existing.Name != name
-                && foreignKey.AreCompatible(existing.ForeignKey, dependentTable, shouldThrow: false))
+            // Compare against every previously-seen candidate for this structure, not just the
+            // first: compatibility is pairwise, so a foreign key incompatible with an earlier
+            // candidate says nothing about whether it -- or that earlier candidate -- conflicts
+            // with a different one also recorded for this structure.
+            foreach (var existing in candidates)
             {
-                var storeObjectPair = new StoreObjectPair(dependentTable, principalTableValue);
-
-                // This check is scoped to the new per-store-object override feature: two entity
-                // types sharing a table are free to configure differing *global* constraint names
-                // for what is structurally the same constraint (that scenario is unrelated to this
-                // feature and must keep validating cleanly, as it does on main today). Only throw
-                // when at least one of the conflicting names was actually produced by a
-                // per-store-object override.
-                if (RelationalForeignKeyOverrides.Find(foreignKey, storeObjectPair) is { IsNameOverridden: true }
-                    || RelationalForeignKeyOverrides.Find(existing.ForeignKey, storeObjectPair) is { IsNameOverridden: true })
+                if (existing.Name != name
+                    && foreignKey.AreCompatible(existing.ForeignKey, dependentTable, shouldThrow: false))
                 {
-                    // Structurally identical *and* behaviorally compatible (same delete behavior,
-                    // uniqueness, etc.): this is the single database constraint the two entity types
-                    // share, so the two names must agree. When they are not compatible, giving them
-                    // different names is legitimate and required -- SharedTableConvention's own
-                    // uniquification already relies on that escape valve for defaulted names (see
-                    // Passes_for_incompatible_foreignKeys_within_hierarchy).
-                    throw new InvalidOperationException(
-                        RelationalStrings.DuplicateConstraintNameOverride(
-                            table.DisplayName(), existing.Name, name));
+                    var storeObjectPair = new StoreObjectPair(dependentTable, principalTableValue);
+
+                    // This check is scoped to the new per-store-object override feature: two entity
+                    // types sharing a table are free to configure differing *global* constraint names
+                    // for what is structurally the same constraint (that scenario is unrelated to this
+                    // feature and must keep validating cleanly, as it does on main today). Only throw
+                    // when at least one of the conflicting names was actually produced by a
+                    // per-store-object override.
+                    if (RelationalForeignKeyOverrides.Find(foreignKey, storeObjectPair) is { IsNameOverridden: true }
+                        || RelationalForeignKeyOverrides.Find(existing.ForeignKey, storeObjectPair) is { IsNameOverridden: true })
+                    {
+                        // Structurally identical *and* behaviorally compatible (same delete behavior,
+                        // uniqueness, etc.): this is the single database constraint the two entity types
+                        // share, so the two names must agree. When they are not compatible, giving them
+                        // different names is legitimate and required -- SharedTableConvention's own
+                        // uniquification already relies on that escape valve for defaulted names (see
+                        // Passes_for_incompatible_foreignKeys_within_hierarchy).
+                        throw new InvalidOperationException(
+                            RelationalStrings.DuplicateConstraintNameOverride(
+                                table.DisplayName(), existing.Name, name));
+                    }
                 }
             }
+
+            candidates.Add((foreignKey, name));
         }
     }
 
