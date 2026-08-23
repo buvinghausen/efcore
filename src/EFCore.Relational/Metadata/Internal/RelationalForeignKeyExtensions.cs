@@ -224,16 +224,7 @@ public static class RelationalForeignKeyExtensions
                     .Select(t => StoreObjectIdentifier.Create(t, StoreObjectType.Table))
                     .Where(t => t != null);
 
-                // Deliberately not the parameterless GetConstraintName(): that overload now
-                // resolves through this same per-store-object machinery (Fix 5), which would make
-                // it null here for exactly the same "properties don't map to storeObject's
-                // columns" reason that got us into this branch, always short-circuiting the
-                // warning below. This condition instead asks the coarse, type-level question the
-                // parameterless getter used to answer on its own: is the foreign key constrained
-                // and is its declaring type mapped to a table at all -- independent of whether
-                // *this* store object's columns actually materialize it.
-                if (foreignKey.IsConstrained
-                    && foreignKey.DeclaringEntityType.GetTableName() != null
+                if (foreignKey.GetConstraintName() != null
                     && derivedTables.All(t => foreignKey.GetConstraintName(
                             t!.Value,
                             principalTable)

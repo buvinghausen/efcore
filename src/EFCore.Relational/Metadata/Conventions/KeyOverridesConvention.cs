@@ -99,7 +99,11 @@ public class KeyOverridesConvention : IKeyAnnotationChangedConvention
         // convention runs, and are only recoverable from oldAnnotation. Merge them back in. On a
         // same-store-object collision the incoming (already-reattached) entry wins, since it
         // reflects what MergeAnnotationsFrom just wrote and is the caller's intent for the attach.
-        if (oldAnnotation?.Value is IReadOnlyStoreObjectDictionary<IConventionRelationalKeyOverrides> oldOverrides)
+        // Gated on annotation != null: a wholesale removal of the KeyOverrides annotation (no
+        // in-tree path reaches that today, since RelationalKeyOverrides.Remove mutates the
+        // dictionary in place without writing the annotation) must not resurrect every old entry.
+        if (annotation != null
+            && oldAnnotation?.Value is IReadOnlyStoreObjectDictionary<IConventionRelationalKeyOverrides> oldOverrides)
         {
             foreach (var overrides in oldOverrides.GetValues())
             {

@@ -2513,10 +2513,6 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
     }
 
     /// <summary>
-    ///     Appends a literal expression that constructs the given <see cref="StoreObjectIdentifier" />. The type is
-    ///     always fully qualified since the generated snapshot's usings are not tracked by this generator.
-    /// </summary>
-    /// <summary>
     ///     Returns a literal expression that constructs the given <see cref="StoreObjectIdentifier" />, for use
     ///     inline within a larger interpolated receiver expression (see <see cref="GenerateKeyOverridesAnnotations" />
     ///     and <see cref="GenerateForeignKeyOverridesAnnotations" />), where the literal is needed as a string
@@ -2529,6 +2525,10 @@ public class CSharpSnapshotGenerator : ICSharpSnapshotGenerator
         return builder.ToString();
     }
 
+    /// <summary>
+    ///     Appends a literal expression that constructs the given <see cref="StoreObjectIdentifier" />. The type is
+    ///     always fully qualified since the generated snapshot's usings are not tracked by this generator.
+    /// </summary>
     private void AppendStoreObjectIdentifierLiteral(StoreObjectIdentifier storeObject, IndentedStringBuilder stringBuilder)
     {
         stringBuilder.Append("Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.");
