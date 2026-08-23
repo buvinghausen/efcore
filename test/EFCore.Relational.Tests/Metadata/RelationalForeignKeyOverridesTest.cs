@@ -153,6 +153,59 @@ public class RelationalForeignKeyOverridesTest
             relationalModel.Tables.Single(t => t.Name == "Post").ForeignKeyConstraints.Single().Name);
     }
 
+    [Fact] // Review Fix 5: the parameterless GetConstraintName() must be override-aware
+    public void Parameterless_GetConstraintName_agrees_with_the_store_object_overload()
+    {
+        var modelBuilder = FakeRelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<Blog>();
+        modelBuilder.Entity<Post>(b => b.HasOne<Blog>().WithMany().HasForeignKey(p => p.BlogId));
+
+        var postType = modelBuilder.Model.FindEntityType(typeof(Post))!;
+        var foreignKey = (IMutableForeignKey)postType.GetForeignKeys().Single();
+        var blogTable = StoreObjectIdentifier.Table("Blog");
+        var postTable = StoreObjectIdentifier.Table("Post");
+
+        // An ordinary, un-split, single-table relationship configured only through the
+        // store-object overload -- never through the parameterless HasConstraintName/SetConstraintName.
+        foreignKey.SetConstraintName("fk_post_blog_override", postTable, blogTable);
+
+        Assert.Equal(
+            foreignKey.GetConstraintName(postTable, blogTable),
+            foreignKey.GetConstraintName());
+        Assert.Equal("fk_post_blog_override", foreignKey.GetConstraintName());
+    }
+
+    [Fact] // Review Fix 1: CanSetConstraintName must compare the stored override, not the resolved name
+    public void Explicit_null_foreign_key_constraint_name_override_refuses_a_convention_proposing_the_default_name()
+    {
+        var modelBuilder = FakeRelationalTestHelpers.Instance.CreateConventionBuilder();
+        modelBuilder.Entity<Blog>();
+        modelBuilder.Entity<Post>(b => b.HasOne<Blog>().WithMany().HasForeignKey(p => p.BlogId));
+
+        var postType = modelBuilder.Model.FindEntityType(typeof(Post))!;
+        var foreignKey = (IConventionForeignKey)postType.GetForeignKeys().Single();
+        var blogTable = StoreObjectIdentifier.Table("Blog");
+        var postTable = StoreObjectIdentifier.Table("Post");
+
+        RelationalForeignKeyOverrides.GetOrCreate(
+            (IMutableForeignKey)foreignKey, new StoreObjectPair(postTable, blogTable), ConfigurationSource.Explicit)
+            .SetName(null, ConfigurationSource.Explicit);
+
+        var defaultName = foreignKey.GetDefaultName(postTable, blogTable);
+        Assert.NotNull(defaultName);
+
+        // Same concern as the key-side Explicit_null_key_name_override_refuses_a_convention_proposing_the_default_name:
+        // GetConstraintName(storeObject, principalStoreObject) resolves the explicit-null override
+        // to this same default name, so CanSetConstraintName must compare the *stored* override
+        // name (null), not that resolved value, or a convention-source write proposing the default
+        // name would be wrongly permitted.
+        Assert.Null(foreignKey.Builder.HasConstraintName(defaultName, postTable, blogTable, fromDataAnnotation: false));
+
+        var overrides = RelationalForeignKeyOverrides.Find(foreignKey, new StoreObjectPair(postTable, blogTable))!;
+        Assert.True(overrides.IsNameOverridden);
+        Assert.Null(overrides.Name);
+    }
+
     [Fact]
     public void Explicit_null_foreign_key_constraint_name_override_survives_the_in_memory_runtime_model()
     {
@@ -226,6 +279,51 @@ public class RelationalForeignKeyOverridesTest
         Assert.Null(foreignKey.GetConstraintName(absent, users));
     }
 
+    [Fact] // Review Fix 4: the linked-foreign-key traversal must consult per-store-object overrides
+    public void Foreign_key_override_on_one_fragment_propagates_to_the_linked_foreign_key()
+    {
+        var modelBuilder = FakeRelationalTestHelpers.Instance.CreateConventionBuilder();
+
+        modelBuilder.Entity<SharedCustomer>().ToTable("Customers");
+        modelBuilder.Entity<SharedOrder>(b =>
+        {
+            b.ToTable("Orders");
+            b.Property(o => o.CustomerId).HasColumnName("CustomerId");
+            b.HasOne<SharedCustomer>().WithMany().HasForeignKey(o => o.CustomerId);
+        });
+        modelBuilder.Entity<SharedOrderDetails>(b =>
+        {
+            b.ToTable("Orders");
+            // The identifying relationship that makes this table splitting rather than a collision,
+            // and what makes SharedOrder's and SharedOrderDetails's foreign keys to SharedCustomer
+            // "linked" for GetDefaultName's shared-table traversal.
+            b.HasOne<SharedOrder>().WithOne().HasForeignKey<SharedOrderDetails>(d => d.Id);
+            // Without an explicit shared column name, SharedTableConvention disambiguates
+            // SharedOrderDetails.CustomerId onto its own column, which would make the two foreign
+            // keys structurally distinct rather than linked -- defeating the premise of this test.
+            b.Property(d => d.CustomerId).HasColumnName("CustomerId");
+            b.HasOne<SharedCustomer>().WithMany().HasForeignKey(d => d.CustomerId);
+        });
+
+        var orders = StoreObjectIdentifier.Table("Orders");
+        var customers = StoreObjectIdentifier.Table("Customers");
+
+        var orderFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrder))!
+            .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
+        var detailsFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrderDetails))!
+            .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
+
+        // Set the override on only one of the two linked foreign keys.
+        orderFk.SetConstraintName("fk_shared", orders, customers);
+
+        // Both must resolve to the same, overridden name -- one database constraint gets one name
+        // -- even though only orderFk carries the override directly. Without the fix, detailsFk's
+        // traversal only sees the global Name annotation on orderFk (there is none here), falls
+        // through to computing its own independent default, and the two resolve differently.
+        Assert.Equal("fk_shared", orderFk.GetConstraintName(orders, customers));
+        Assert.Equal("fk_shared", detailsFk.GetConstraintName(orders, customers));
+    }
+
     [Fact]
     public void Conflicting_overrides_on_a_deduplicated_constraint_are_rejected()
     {
@@ -273,6 +371,66 @@ public class RelationalForeignKeyOverridesTest
         Assert.Contains("fk_b", message);
     }
 
+    [Fact] // Review Fix 2: every candidate per structure must be retained, not just the first
+    public void Conflicting_overrides_are_rejected_even_when_the_first_candidate_is_incompatible()
+    {
+        var modelBuilder = FakeRelationalTestHelpers.Instance.CreateConventionBuilder();
+
+        modelBuilder.Entity<SharedCustomer>().ToTable("Customers");
+        modelBuilder.Entity<SharedOrder>(b =>
+        {
+            b.ToTable("Orders");
+            b.Property(o => o.CustomerId).HasColumnName("CustomerId");
+            // Differs in delete behavior from the other two below -- incompatible with both.
+            b.HasOne<SharedCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<SharedOrderDetails>(b =>
+        {
+            b.ToTable("Orders");
+            // The identifying relationship that makes this table splitting rather than a collision.
+            b.HasOne<SharedOrder>().WithOne().HasForeignKey<SharedOrderDetails>(d => d.Id);
+            b.Property(d => d.CustomerId).HasColumnName("CustomerId");
+            b.HasOne<SharedCustomer>().WithMany().HasForeignKey(d => d.CustomerId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<SharedOrderExtra>(b =>
+        {
+            b.ToTable("Orders");
+            // A second, distinct fragment linked to the same root, so three entity types --
+            // and three structurally identical foreign keys -- end up sharing "Orders".
+            b.HasOne<SharedOrder>().WithOne().HasForeignKey<SharedOrderExtra>(x => x.Id);
+            b.Property(x => x.CustomerId).HasColumnName("CustomerId");
+            b.HasOne<SharedCustomer>().WithMany().HasForeignKey(x => x.CustomerId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        var orders = StoreObjectIdentifier.Table("Orders");
+        var customers = StoreObjectIdentifier.Table("Customers");
+
+        var orderFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrder))!
+            .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
+        var detailsFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrderDetails))!
+            .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
+        var extraFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SharedOrderExtra))!
+            .GetForeignKeys().Single(fk => fk.PrincipalEntityType.ClrType == typeof(SharedCustomer));
+
+        // Sanity check the premise: the first-recorded candidate (SharedOrder's foreign key) is
+        // genuinely incompatible with the other two, so a "compare only against the first
+        // recorded candidate" implementation would skip both comparisons and never reach the real
+        // conflict checked below.
+        Assert.False(orderFk.AreCompatible(detailsFk, orders, shouldThrow: false));
+        Assert.False(orderFk.AreCompatible(extraFk, orders, shouldThrow: false));
+        Assert.True(detailsFk.AreCompatible(extraFk, orders, shouldThrow: false));
+
+        detailsFk.SetConstraintName("fk_b", orders, customers);
+        extraFk.SetConstraintName("fk_c", orders, customers);
+
+        var message = Assert.Throws<InvalidOperationException>(() => modelBuilder.FinalizeModel()).Message;
+        Assert.Contains("fk_b", message);
+        Assert.Contains("fk_c", message);
+    }
+
     [Fact] // Review Fix 2: ValidateSharedForeignKeyNameOverrides must not fire when neither FK carries an override
     public void Differing_global_constraint_names_on_a_deduplicated_constraint_are_not_rejected()
     {
@@ -315,6 +473,57 @@ public class RelationalForeignKeyOverridesTest
 
         Assert.Equal("fk_a", orderFk.GetConstraintName(orders, customers));
         Assert.Equal("fk_b", detailsFk.GetConstraintName(orders, customers));
+    }
+
+    [Fact] // Review Fix 3: reattach must merge, not clobber, the reused foreign key's own overrides
+    public void Foreign_key_overrides_survive_when_attached_onto_an_existing_foreign_key_with_its_own_overrides()
+    {
+        var modelBuilder = FakeRelationalTestHelpers.Instance.CreateConventionBuilder();
+
+        // Author gets its own foreign key to Blog by convention, and its own override.
+        modelBuilder.Entity<Author>(b => b.HasOne<Blog>().WithMany().HasForeignKey("BlogId"));
+
+        var authorFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(Author))!.GetForeignKeys().Single();
+        var blogTable = StoreObjectIdentifier.Table("Blog");
+        var authorTable = StoreObjectIdentifier.Table("Author");
+        var fromRootPair = new StoreObjectPair(authorTable, blogTable);
+
+        RelationalForeignKeyOverrides.GetOrCreate(authorFk, fromRootPair, ConfigurationSource.Explicit)
+            .SetName("fk_from_root", ConfigurationSource.Explicit);
+
+        // SpecialAuthor starts out standalone with its own structurally-identical foreign key to
+        // Blog (same property, same principal), and its own override at a different store object.
+        modelBuilder.Entity<SpecialAuthor>();
+        modelBuilder.Entity<SpecialAuthor>().HasBaseType((Type?)null);
+        modelBuilder.Entity<SpecialAuthor>(b =>
+        {
+            b.ToTable("Author");
+            b.HasOne<Blog>().WithMany().HasForeignKey("BlogId");
+        });
+
+        var specialFk = (IMutableForeignKey)modelBuilder.Model.FindEntityType(typeof(SpecialAuthor))!.GetForeignKeys().Single();
+        var specialAuthorTable = StoreObjectIdentifier.Table("SpecialAuthor");
+        var fromDerivedPair = new StoreObjectPair(specialAuthorTable, blogTable);
+
+        RelationalForeignKeyOverrides.GetOrCreate(specialFk, fromDerivedPair, ConfigurationSource.Explicit)
+            .SetName("fk_from_derived", ConfigurationSource.Explicit);
+
+        // Assigning the base type detaches SpecialAuthor's foreign key and attaches it onto
+        // Author's existing, structurally-identical foreign key -- the "reused" case.
+        modelBuilder.Entity<SpecialAuthor>().HasBaseType<Author>();
+
+        var newFk = modelBuilder.Model.FindEntityType(typeof(Author))!.GetForeignKeys().Single();
+
+        // The guard that makes this test meaningful: the target foreign key really was reused, not
+        // recreated, so the merge this test is exercising was actually necessary.
+        Assert.Same(authorFk, newFk);
+
+        // Checked against the stored overrides directly, not the resolved constraint name: the
+        // "SpecialAuthor" store object used above is a bookkeeping key for the detached override,
+        // not Author's real (post-merge) table, so GetConstraintName's materialization gate would
+        // fail it for a reason unrelated to what this test is proving.
+        Assert.Equal("fk_from_root", RelationalForeignKeyOverrides.Find(newFk, fromRootPair)!.Name);
+        Assert.Equal("fk_from_derived", RelationalForeignKeyOverrides.Find(newFk, fromDerivedPair)!.Name);
     }
 
     [Fact]
@@ -485,6 +694,12 @@ public class RelationalForeignKeyOverridesTest
     }
 
     private class SharedOrderDetails
+    {
+        public int Id { get; set; }
+        public int CustomerId { get; set; }
+    }
+
+    private class SharedOrderExtra
     {
         public int Id { get; set; }
         public int CustomerId { get; set; }
