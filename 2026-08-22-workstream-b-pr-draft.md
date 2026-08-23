@@ -69,20 +69,24 @@ zero duplicate constraint names across the split tables.
 
 ## Test coverage
 
-- `EFCore.Relational.Tests`: 1500/1501 passed (1 pre-existing skip), including
+- `EFCore.Relational.Tests`: 1509 run, **0 failed**, 1 skipped, including
   18 new tests in `RelationalKeyOverridesTest`/`RelationalForeignKeyOverridesTest`.
-- `EFCore.Sqlite.FunctionalTests`: full project sweep, 0 non-environmental
-  failures (177 failures are `mod_spatialite` load failures in a sandbox
-  without that native library — unrelated to this change, verified
-  exhaustively). The 4 new compiled-model round-trip tests pass.
-- `EFCore.Design.Tests`: 1269/1275 passed; the 5 failures are pre-existing,
-  platform-specific (`OperationExecutorTest` Windows-path assertions failing
-  on Linux), and untouched by this branch. The 171 tests in
+- `EFCore.Sqlite.FunctionalTests`: 38227 run, **0 failed**, 286 skipped.
+  The 4 new compiled-model round-trip tests pass.
+- `EFCore.Design.Tests`: 1249 run, **0 failed**. The tests in
   `CSharpMigrationsGeneratorTest` (including this PR's snapshot-generation
   tests) all pass.
-- `EFCore.SqlServer.FunctionalTests`: **not run — no SQL Server instance
-  available in the environment that prepared this PR.** Needs to run before
-  merge.
+- `EFCore.ApiBaseline.Tests`: 14 run, **0 failed**.
+- `EFCore.SqlServer.FunctionalTests`: 50861 run, **0 failed**, 425 skipped.
+  All seven projects in the repo's `SQLSERVER_TEST_PROJECTS` CI list were run
+  (SqlServer.FunctionalTests, SqlServer.HierarchyId.Tests, CrossStore,
+  OData, AspNet.SqlServer, VisualBasic, FSharp): 51118 tests, **0 failed**.
+  Run against SQL Server 2025 CU8 (17.0.4075.5) with full-text search
+  installed, using the connection string from `.github/workflows/Build.yml`.
+
+All figures are from the branch rebased onto `main` @ ecd0ba4c23, with the
+runner argument `--filter-not-trait category=failing` that the build normally
+supplies. 92117 tests across 11 projects, 0 failures.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```

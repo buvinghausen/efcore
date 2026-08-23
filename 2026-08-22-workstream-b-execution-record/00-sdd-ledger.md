@@ -204,3 +204,32 @@ Task B4: minor (deferred): the brief's single end-to-end test became three. The 
 
 Ruling: **F4 — the plan's test snippets do not compile in `test/EFCore.Relational.Tests`.** Two substitutions apply to every Phase-B test written into that project: `RelationalTestHelpers.Instance` → `FakeRelationalTestHelpers.Instance`, and `[ConditionalFact]` → `[Fact]`. Why: verified `RelationalTestHelpers` (`test/EFCore.Relational.Specification.Tests/TestUtilities/RelationalTestHelpers.cs:6`) is **abstract** and in a different project, while `FakeRelationalTestHelpers` (`test/EFCore.Relational.Tests/TestUtilities/FakeRelationalTestHelpers.cs:8`) is the concrete local one; and zero files in `EFCore.Relational.Tests` use `ConditionalFact` (25 repo-wide, none here). The substitution is **project-scoped** — B6's test lands in `EFCore.Relational.Specification.Tests`, which uses the fixture's own `CreateModelBuilder()` and must not be rewritten this way. Carry into the B2, B3, B5 and B9 dispatches. Cost if wrong: compile errors caught on the task's first build.
 
+
+## Gap closure — 2026-08-23
+
+Ruling: **F21 — the SQL Server gap is closed, and two of the three "known gaps" were never real.**
+Full record in `2026-08-23-sqlserver-verification.md`. Branch rebased onto `main` @ ecd0ba4c23
+(29 commits, clean — the 19 intervening main commits touch only `eng/Versions.props`), then all
+seven of CI's `SQLSERVER_TEST_PROJECTS` plus the four suites covering the Relational changes:
+**92,117 tests, 0 failures.**
+
+The finding that matters more than the numbers: `[ConditionalFact]`/`[ConditionalClass]` do not
+skip anything on their own. They tag non-matching tests `category=failing`, and
+`test/Directory.Build.props` injects `--filter-not-trait category=failing` for the runner to act
+on. F9's direct-dll inner loop bypasses MSBuild and therefore drops that argument, so every
+environment-gated test executes and fails. That artifact is what produced the 3
+`SqlAzureDatabaseCreationTest` failures, the 177 Sqlite `mod_spatialite` failures and the 5
+`EFCore.Design.Tests` "pre-existing platform failures" recorded earlier in this run — none of
+them were real.
+
+**This amends F9 and supersedes F18's framing.** F9's speedup stands, but the recipe was
+incomplete: the direct-dll command must carry `--filter-not-trait category=failing`. F18 warned
+that `build.sh --test` could report green off a stale assembly; together the two say neither
+driver is self-certifying. Cost of the original omission: three false failure reports that cost
+real triage time and were written into the record as environmental facts.
+
+Ruling: **F22 — a test on a shared relational base class needs baselines for every provider that
+inherits it.** The four `*_the_compiled_model*` tests shipped with Sqlite baselines only, so all
+four failed on SQL Server with a missing-baseline `FileNotFoundException` the first time an
+instance existed to run them. Fixed in 992f05fab6. Carry into Phase A: anything added to
+`CompiledModelRelationalTestBase` or a sibling base class needs the same treatment.

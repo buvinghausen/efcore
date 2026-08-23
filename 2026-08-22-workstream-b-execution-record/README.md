@@ -46,11 +46,26 @@ just `git diff A..B` over commits that are all on origin) and the brief-extracti
   of a faithful mirror is worse than matching an upstream oddity. If it is a bug it is upstream's.
   `codex-fixes-report.md`.
 
-## Known gaps at the time of writing
+## Known gaps at the time of writing — all closed 2026-08-23
 
-- **SQL Server functional tests have never run** — no instance was available in the execution
-  environment. This is the one real coverage hole. Sqlite, Relational, Design and the API
-  baseline suites were all swept.
-- Sqlite shows 177 `mod_spatialite` failures on linux-arm64; environmental, confirmed unrelated.
-- `EFCore.Design.Tests` carries 5 pre-existing failures (Windows-path assertions on Linux) in an
-  untouched file.
+The three gaps below were recorded when this directory was written. All three are now closed,
+and two of them turned out to be measurement artifacts rather than real failures. See
+`2026-08-23-sqlserver-verification.md` for the run that closed them.
+
+- ~~**SQL Server functional tests have never run**~~ — **closed.** They could not run on the
+  aarch64 machine at all: Microsoft publishes no arm64 `mssql/server` image. Run on x64 against
+  SQL Server 2025 CU8: all seven of CI's `SQLSERVER_TEST_PROJECTS`, 51,118 tests, **0 failures**.
+- ~~Sqlite shows 177 `mod_spatialite` failures~~ — **not real.** 38,227 tests, **0 failures**.
+- ~~`EFCore.Design.Tests` carries 5 pre-existing failures~~ — **not real.** 1,249 tests,
+  **0 failures**.
+
+The last two were an artifact of how the suites were being invoked. Running a test dll directly
+skips MSBuild, and `test/Directory.Build.props` is what injects
+`--filter-not-trait category=failing` — the argument that `[ConditionalFact]`/`[ConditionalClass]`
+actually rely on to skip. Those attributes do not skip anything themselves; they tag
+non-matching tests with `category=failing` and leave the filtering to the runner. Without the
+argument, every environment-gated test executes and fails.
+
+**Standing rule this replaces F18 with:** a direct-dll run is only trustworthy if it carries
+`--filter-not-trait category=failing`. Without it, a green run is not green and a red run is not
+red.
