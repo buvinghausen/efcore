@@ -42,11 +42,24 @@ public static class RelationalForeignKeyExtensions
         var principalStoreObject = StoreObjectIdentifier.Create(foreignKey.PrincipalEntityType, StoreObjectType.Table);
         if (storeObject.HasValue && principalStoreObject.HasValue)
         {
-            return foreignKey.GetConstraintName(storeObject.Value, principalStoreObject.Value);
+            var name = foreignKey.GetConstraintName(storeObject.Value, principalStoreObject.Value);
+            if (name != null)
+            {
+                return name;
+            }
+
+            // The store-object overload also returns null for a "redundant" self-referential
+            // relationship where the dependent and principal share the same table and key columns
+            // (e.g. an owned type in table splitting) -- no separate constraint materializes there,
+            // so nothing for an override to name. That is a real, different case from "no name
+            // configured": fall through to the original resolution below rather than losing a
+            // configured global name (e.g. via the parameterless HasConstraintName(name)) that the
+            // store-object overload was never meant to see.
         }
 
-        // Either table could not be determined (e.g. TPT/TPC or an unmapped principal): fall back
-        // to the original, non-override-aware resolution rather than throwing.
+        // Either table could not be determined (e.g. TPT/TPC or an unmapped principal), or the
+        // store-object overload had nothing to say (see above): fall back to the original,
+        // non-override-aware resolution rather than returning null or throwing.
         var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
         return annotation != null
             ? (string?)annotation.Value
