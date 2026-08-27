@@ -7022,6 +7022,125 @@ partial class Snapshot : ModelSnapshot
                 Assert.Equal(90, key.GetFillFactor());
             });
 
+    [Fact]
+    public void Snapshot_round_trips_per_store_object_key_constraint_names()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomer>(b =>
+            {
+                b.ToTable("Customers");
+                b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+                b.HasKey(c => c.Id)
+                    .HasName("pk_customers", StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                    .HasName("pk_customer_details", StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema"));
+            }),
+            """key.HasName("pk_customers", Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Customers", "DefaultSchema"));""",
+            model =>
+            {
+                var key = model.FindEntityType(typeof(OverridesCustomer))!.FindPrimaryKey()!;
+                Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+                Assert.Equal("pk_customer_details", key.GetName(StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema")));
+            },
+            fullSnapshot: false);
+
+    [Fact]
+    public void Snapshot_round_trips_per_store_object_key_constraint_name_with_type_qualified_key_annotation()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomer>(b =>
+            {
+                b.ToTable("Customers");
+                b.HasKey(c => c.Id)
+                    .HasName("pk_customers", StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                    .HasFillFactor(90);
+            }),
+            """
+            var key = b.HasKey("Id");
+            """,
+            model =>
+            {
+                var key = model.FindEntityType(typeof(OverridesCustomer))!.FindPrimaryKey()!;
+                Assert.Equal("pk_customers", key.GetName(StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+                Assert.Equal(90, key.GetFillFactor());
+            },
+            fullSnapshot: false);
+
+    [Fact]
+    public void Snapshot_round_trips_explicit_null_key_constraint_name_override()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomer>(b =>
+            {
+                b.ToTable("Customers");
+                b.SplitToTable("CustomerDetails", s => s.Property(c => c.Name));
+                b.HasKey(c => c.Id)
+                    .HasName("pk_global")
+                    .HasName(null, StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema"));
+            }),
+            """key.HasName(null, Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema"));""",
+            model =>
+            {
+                var key = model.FindEntityType(typeof(OverridesCustomer))!.FindPrimaryKey()!;
+
+                // The main table has no override, so it resolves through to the global name.
+                Assert.Equal("pk_global", key.GetName(StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+
+                // The explicit-null override on the fragment must resolve to the *default* name,
+                // not fall through to the global "pk_global" annotation. That only happens if
+                // IsNameOverridden: true, Name: null actually survived the round trip rather than
+                // collapsing into "no override at all".
+                Assert.Equal(
+                    key.GetDefaultName(StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema")),
+                    key.GetName(StoreObjectIdentifier.Table("CustomerDetails", "DefaultSchema")));
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 6: annotations on key overrides were dropped from the snapshot
+    public void Snapshot_round_trips_key_override_annotation()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomer>(b =>
+            {
+                b.ToTable("Customers");
+                b.HasKey(c => c.Id)
+                    .HasName("pk_customers", StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                    .HasOverrides(StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                    .HasAnnotation("Test:Comment", "note");
+            }),
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var key = model.FindEntityType(typeof(OverridesCustomer))!.FindPrimaryKey()!;
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+
+                Assert.Equal("pk_customers", key.GetName(customers));
+
+                var overrides = key.GetOverrides().Single(o => o.StoreObject == customers);
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 6: an override carrying only an annotation, with no name, was dropped entirely
+    public void Snapshot_round_trips_annotation_only_key_override()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomer>(b =>
+            {
+                b.ToTable("Customers");
+                b.HasKey(c => c.Id)
+                    .HasOverrides(StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                    .HasAnnotation("Test:Comment", "note");
+            }),
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var key = model.FindEntityType(typeof(OverridesCustomer))!.FindPrimaryKey()!;
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+
+                var overrides = key.GetOverrides().Single(o => o.StoreObject == customers);
+
+                // The override carries no name at all, only the annotation -- this must not have
+                // been turned into an explicit-null name override by the round trip.
+                Assert.False(overrides.IsNameOverridden);
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
     #endregion
 
     #region Index
@@ -8799,6 +8918,342 @@ partial class Snapshot : ModelSnapshot
                 Assert.Equal(2, entityType.GetKeys().Count());
                 Assert.Equal("Value", entityType.FindKey(entityType.FindProperty("AlternateId")!)!["Name"]);
             });
+
+    [Fact]
+    public void Snapshot_round_trips_per_store_object_foreign_key_constraint_names()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrder>(b =>
+                {
+                    b.ToTable("Orders");
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                        .HasConstraintName(
+                            "fk_orders_customers",
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"));
+                });
+            },
+            """
+            .HasConstraintName("fk_orders_customers", Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Orders", "DefaultSchema"), Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+            """,
+            model =>
+            {
+                var foreignKey = model.FindEntityType(typeof(OverridesOrder))!.GetForeignKeys().Single();
+                Assert.Equal(
+                    "fk_orders_customers",
+                    foreignKey.GetConstraintName(
+                        StoreObjectIdentifier.Table("Orders", "DefaultSchema"), StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 1: per-store-object FK overrides were dropped from the snapshot for ownership FKs
+    public void Snapshot_round_trips_per_store_object_foreign_key_constraint_name_for_owned_type_in_own_table()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomerWithAddress>(b =>
+            {
+                b.ToTable("Customers");
+                b.OwnsOne(
+                    c => c.Address,
+                    a =>
+                    {
+                        a.ToTable("CustomerAddress");
+                        a.WithOwner()
+                            .HasConstraintName(
+                                "fk_customeraddress_customers",
+                                StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                                StoreObjectIdentifier.Table("Customers", "DefaultSchema"));
+                    });
+            }),
+            """
+            .HasConstraintName("fk_customeraddress_customers", Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"), Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+            """,
+            model =>
+            {
+                var ownedEntityType = model.FindEntityType(typeof(OverridesCustomerWithAddress))!
+                    .FindNavigation(nameof(OverridesCustomerWithAddress.Address))!.TargetEntityType;
+                var foreignKey = ownedEntityType.GetForeignKeys().Single();
+
+                Assert.True(foreignKey.IsOwnership);
+                Assert.Equal(
+                    "fk_customeraddress_customers",
+                    foreignKey.GetConstraintName(
+                        StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                        StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 4: the explicit-null override was covered on the runtime and compiled models, but not the snapshot
+    public void Snapshot_round_trips_explicit_null_foreign_key_constraint_name_override()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrder>(b =>
+                {
+                    b.ToTable("Orders");
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                        .HasConstraintName("fk_global")
+                        .HasConstraintName(
+                            null,
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"));
+                });
+            },
+            """
+            .HasConstraintName(null, Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Orders", "DefaultSchema"), Microsoft.EntityFrameworkCore.Metadata.StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+            """,
+            model =>
+            {
+                var foreignKey = model.FindEntityType(typeof(OverridesOrder))!.GetForeignKeys().Single();
+
+                // The explicit-null override must resolve to the *default* name, not fall through
+                // to the global "fk_global" annotation. That only happens if
+                // IsNameOverridden: true, Name: null actually survived the round trip rather than
+                // collapsing into "no override at all".
+                Assert.Equal(
+                    foreignKey.GetDefaultName(
+                        StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                        StoreObjectIdentifier.Table("Customers", "DefaultSchema")),
+                    foreignKey.GetConstraintName(
+                        StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                        StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 6: annotations on foreign key overrides were dropped from the snapshot
+    public void Snapshot_round_trips_foreign_key_override_annotation()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrder>(b =>
+                {
+                    b.ToTable("Orders");
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                        .HasConstraintName(
+                            "fk_orders_customers",
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasOverrides(
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasAnnotation("Test:Comment", "note");
+                });
+            },
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var foreignKey = model.FindEntityType(typeof(OverridesOrder))!.GetForeignKeys().Single();
+                var orders = StoreObjectIdentifier.Table("Orders", "DefaultSchema");
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+
+                Assert.Equal("fk_orders_customers", foreignKey.GetConstraintName(orders, customers));
+
+                var overrides = foreignKey.GetOverrides().Single(o => o.StoreObjects == new StoreObjectPair(orders, customers));
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
+    [Fact] // Review Fix 6: an override carrying only an annotation, with no name, was dropped entirely
+    public void Snapshot_round_trips_annotation_only_foreign_key_override()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrder>(b =>
+                {
+                    b.ToTable("Orders");
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                        .HasOverrides(
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasAnnotation("Test:Comment", "note");
+                });
+            },
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var foreignKey = model.FindEntityType(typeof(OverridesOrder))!.GetForeignKeys().Single();
+                var orders = StoreObjectIdentifier.Table("Orders", "DefaultSchema");
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+
+                var overrides = foreignKey.GetOverrides().Single(o => o.StoreObjects == new StoreObjectPair(orders, customers));
+
+                // The override carries no name at all, only the annotation -- this must not have
+                // been turned into an explicit-null name override by the round trip.
+                Assert.False(overrides.IsNameOverridden);
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
+    [Fact] // GetForeignKeyExpression's ownership branch: an annotation-only override was untested on an ownership foreign key
+    public void Snapshot_round_trips_annotation_only_foreign_key_override_on_ownership_foreign_key()
+        => Test(
+            modelBuilder => modelBuilder.Entity<OverridesCustomerWithAddress>(b =>
+            {
+                b.ToTable("Customers");
+                b.OwnsOne(
+                    c => c.Address,
+                    a =>
+                    {
+                        a.ToTable("CustomerAddress");
+                        // No name at all -- exercises GetForeignKeyExpression's WithOwner-only
+                        // (ownership) branch via an override that carries only an annotation.
+                        a.WithOwner()
+                            .HasOverrides(
+                                StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                                StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                            .HasAnnotation("Test:Comment", "note");
+                    });
+            }),
+            """.HasAnnotation("Test:Comment", "note")""",
+            model =>
+            {
+                var ownedEntityType = model.FindEntityType(typeof(OverridesCustomerWithAddress))!
+                    .FindNavigation(nameof(OverridesCustomerWithAddress.Address))!.TargetEntityType;
+                var foreignKey = ownedEntityType.GetForeignKeys().Single();
+
+                Assert.True(foreignKey.IsOwnership);
+
+                var overrides = foreignKey.GetOverrides().Single(
+                    o => o.StoreObjects == new StoreObjectPair(
+                        StoreObjectIdentifier.Table("CustomerAddress", "DefaultSchema"),
+                        StoreObjectIdentifier.Table("Customers", "DefaultSchema")));
+
+                // No name at all, only the annotation -- this must not have been turned into an
+                // explicit-null name override by the round trip.
+                Assert.False(overrides.IsNameOverridden);
+                Assert.Equal("note", overrides.FindAnnotation("Test:Comment")!.Value);
+            },
+            fullSnapshot: false);
+
+    [Fact] // GetForeignKeyExpression: two foreign keys from the same dependent entity type to the
+           // same principal entity type -- the shape where re-resolving the recomputed
+           // HasOne/WithMany/HasForeignKey chain could bind the override to the wrong foreign key.
+    public void Snapshot_round_trips_foreign_key_override_when_two_foreign_keys_share_dependent_and_principal_types()
+        => Test(
+            modelBuilder =>
+            {
+                modelBuilder.Entity<OverridesCustomer>(b => b.ToTable("Customers"));
+                modelBuilder.Entity<OverridesOrderWithTwoCustomerLinks>(b =>
+                {
+                    b.ToTable("Orders");
+
+                    // Both relationships go from this same dependent entity type to this same
+                    // principal entity type, with no navigations on either side to tell them apart
+                    // -- only their foreign key properties differ. Only the shipping link carries a
+                    // name override and an annotation-only override; the billing link carries
+                    // neither, so a misresolution would show up as either landing on the wrong link.
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.BillingCustomerId);
+                    b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.ShippingCustomerId)
+                        .HasConstraintName(
+                            "fk_orders_customers_shipping",
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasOverrides(
+                            StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                            StoreObjectIdentifier.Table("Customers", "DefaultSchema"))
+                        .HasAnnotation("Test:Comment", "shipping-note");
+                });
+            },
+            """.HasAnnotation("Test:Comment", "shipping-note")""",
+            model =>
+            {
+                var orders = StoreObjectIdentifier.Table("Orders", "DefaultSchema");
+                var customers = StoreObjectIdentifier.Table("Customers", "DefaultSchema");
+                var entityType = model.FindEntityType(typeof(OverridesOrderWithTwoCustomerLinks))!;
+
+                var foreignKeys = entityType.GetForeignKeys().ToList();
+                Assert.Equal(2, foreignKeys.Count);
+
+                var billingFk = foreignKeys.Single(
+                    fk => fk.Properties.Single().Name == nameof(OverridesOrderWithTwoCustomerLinks.BillingCustomerId));
+                var shippingFk = foreignKeys.Single(
+                    fk => fk.Properties.Single().Name == nameof(OverridesOrderWithTwoCustomerLinks.ShippingCustomerId));
+
+                // The override and its annotation must have landed on the shipping foreign key --
+                // the one actually configured -- and nowhere near the billing one.
+                Assert.Equal("fk_orders_customers_shipping", shippingFk.GetConstraintName(orders, customers));
+                var overrides = shippingFk.GetOverrides().Single(o => o.StoreObjects == new StoreObjectPair(orders, customers));
+                Assert.Equal("shipping-note", overrides.FindAnnotation("Test:Comment")!.Value);
+
+                Assert.Empty(billingFk.GetOverrides());
+            },
+            fullSnapshot: false);
+
+    [Fact]
+    public void Snapshot_does_not_emit_raw_key_or_foreign_key_override_annotations()
+    {
+        var modelBuilder = CreateConventionalModelBuilder();
+        modelBuilder.HasDefaultSchema("DefaultSchema");
+        modelBuilder.HasChangeTrackingStrategy(ChangeTrackingStrategy.Snapshot);
+        modelBuilder.Model.RemoveAnnotation(CoreAnnotationNames.ProductVersion);
+
+        modelBuilder.Entity<OverridesCustomer>(b =>
+        {
+            b.ToTable("Customers");
+            b.HasKey(c => c.Id)
+                .HasName("pk_customers", StoreObjectIdentifier.Table("Customers", "DefaultSchema"));
+        });
+        modelBuilder.Entity<OverridesOrder>(b =>
+        {
+            b.ToTable("Orders");
+            b.HasOne<OverridesCustomer>().WithMany().HasForeignKey(o => o.CustomerId)
+                .HasConstraintName(
+                    "fk_orders_customers",
+                    StoreObjectIdentifier.Table("Orders", "DefaultSchema"),
+                    StoreObjectIdentifier.Table("Customers", "DefaultSchema"));
+        });
+
+        var model = modelBuilder.FinalizeModel(designTime: true);
+        var code = CreateMigrationsGenerator().GenerateSnapshot("RootNamespace", typeof(DbContext), "Snapshot", model);
+
+        Assert.DoesNotContain(RelationalAnnotationNames.KeyOverrides, code);
+        Assert.DoesNotContain(RelationalAnnotationNames.ForeignKeyOverrides, code);
+    }
+
+    private class OverridesCustomer
+    {
+        public int Id { get; set; }
+
+        // Split-table tests move Name to a secondary table; this stays on the main table so the
+        // main store object keeps at least one non-key property, as required by validation.
+        public string Email { get; set; } = "";
+
+        public string Name { get; set; } = "";
+    }
+
+    private class OverridesOrder
+    {
+        public int Id { get; set; }
+
+        public int CustomerId { get; set; }
+    }
+
+    private class OverridesOrderWithTwoCustomerLinks
+    {
+        public int Id { get; set; }
+
+        public int BillingCustomerId { get; set; }
+
+        public int ShippingCustomerId { get; set; }
+    }
+
+    private class OverridesCustomerWithAddress
+    {
+        public int Id { get; set; }
+
+        public string Email { get; set; } = "";
+
+        public OverridesAddress Address { get; set; } = new();
+    }
+
+    private class OverridesAddress
+    {
+        public string Street { get; set; } = "";
+    }
 
     #endregion
 

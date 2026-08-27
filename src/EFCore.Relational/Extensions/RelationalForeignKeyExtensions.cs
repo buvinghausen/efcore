@@ -34,6 +34,32 @@ public static class RelationalForeignKeyExtensions
             return null;
         }
 
+        // Mirrors how the parameterless RelationalKeyExtensions.GetName() resolves through the
+        // store-object overload: without this, a per-table override configured only through
+        // GetConstraintName(dependent, principal) is invisible here, disagreeing with both that
+        // overload and the constraint actually created.
+        var storeObject = StoreObjectIdentifier.Create(foreignKey.DeclaringEntityType, StoreObjectType.Table);
+        var principalStoreObject = StoreObjectIdentifier.Create(foreignKey.PrincipalEntityType, StoreObjectType.Table);
+        if (storeObject.HasValue && principalStoreObject.HasValue)
+        {
+            var name = foreignKey.GetConstraintName(storeObject.Value, principalStoreObject.Value);
+            if (name != null)
+            {
+                return name;
+            }
+
+            // The store-object overload also returns null for a "redundant" self-referential
+            // relationship where the dependent and principal share the same table and key columns
+            // (e.g. an owned type in table splitting) -- no separate constraint materializes there,
+            // so nothing for an override to name. That is a real, different case from "no name
+            // configured": fall through to the original resolution below rather than losing a
+            // configured global name (e.g. via the parameterless HasConstraintName(name)) that the
+            // store-object overload was never meant to see.
+        }
+
+        // Either table could not be determined (e.g. TPT/TPC or an unmapped principal), or the
+        // store-object overload had nothing to say (see above): fall back to the original,
+        // non-override-aware resolution rather than returning null or throwing.
         var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
         return annotation != null
             ? (string?)annotation.Value
@@ -133,6 +159,120 @@ public static class RelationalForeignKeyExtensions
     public static ConfigurationSource? GetConstraintNameConfigurationSource(this IConventionForeignKey foreignKey)
         => foreignKey.FindAnnotation(RelationalAnnotationNames.Name)
             ?.GetConfigurationSource();
+
+    /// <summary>
+    ///     Sets the foreign key constraint name for a particular pair of dependent and principal store objects.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this pair.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    public static void SetConstraintName(
+        this IMutableForeignKey foreignKey,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => RelationalForeignKeyOverrides
+            .GetOrCreate(foreignKey, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit)
+            .SetName(Check.NullButNotEmpty(name), ConfigurationSource.Explicit);
+
+    /// <summary>
+    ///     Sets the foreign key constraint name for a particular pair of dependent and principal store objects.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="name">The value to set. Use <see langword="null" /> to suppress a globally configured name for this pair.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns>The configured name.</returns>
+    public static string? SetConstraintName(
+        this IConventionForeignKey foreignKey,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject,
+        bool fromDataAnnotation = false)
+    {
+        var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
+
+        return RelationalForeignKeyOverrides
+            .GetOrCreate(
+                (IMutableForeignKey)foreignKey, new StoreObjectPair(storeObject, principalStoreObject), configurationSource)
+            .SetName(Check.NullButNotEmpty(name), configurationSource);
+    }
+
+    /// <summary>
+    ///     Gets the <see cref="ConfigurationSource" /> for the foreign key constraint name for a particular pair of dependent and
+    ///     principal store objects.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The <see cref="ConfigurationSource" /> for the constraint name.</returns>
+    public static ConfigurationSource? GetConstraintNameConfigurationSource(
+        this IConventionForeignKey foreignKey,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => (RelationalForeignKeyOverrides.Find(foreignKey, new StoreObjectPair(storeObject, principalStoreObject))
+            as IConventionRelationalForeignKeyOverrides)
+            ?.GetNameConfigurationSource();
+
+    /// <summary>
+    ///     Returns all per-store-object-pair constraint name overrides configured for this foreign key.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <returns>The overrides.</returns>
+    public static IEnumerable<IReadOnlyRelationalForeignKeyOverrides> GetOverrides(this IReadOnlyForeignKey foreignKey)
+        => RelationalForeignKeyOverrides.Get(foreignKey) ?? [];
+
+    /// <summary>
+    ///     Returns all per-store-object-pair constraint name overrides configured for this foreign key.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <returns>The overrides.</returns>
+    public static IEnumerable<IMutableRelationalForeignKeyOverrides> GetOverrides(this IMutableForeignKey foreignKey)
+        => RelationalForeignKeyOverrides.Get(foreignKey)?.Cast<IMutableRelationalForeignKeyOverrides>() ?? [];
+
+    /// <summary>
+    ///     Returns all per-store-object-pair constraint name overrides configured for this foreign key.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <returns>The overrides.</returns>
+    public static IEnumerable<IConventionRelationalForeignKeyOverrides> GetOverrides(this IConventionForeignKey foreignKey)
+        => RelationalForeignKeyOverrides.Get(foreignKey)?.Cast<IConventionRelationalForeignKeyOverrides>() ?? [];
+
+    /// <summary>
+    ///     Returns all per-store-object-pair constraint name overrides configured for this foreign key.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <returns>The overrides.</returns>
+    public static IEnumerable<IRelationalForeignKeyOverrides> GetOverrides(this IForeignKey foreignKey)
+        => RelationalForeignKeyOverrides.Get(foreignKey)?.Cast<IRelationalForeignKeyOverrides>() ?? [];
+
+    /// <summary>
+    ///     Removes the per-store-object-pair constraint name override for the given pair of dependent and principal store objects.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The removed override, or <see langword="null" /> if none was configured.</returns>
+    public static IMutableRelationalForeignKeyOverrides? RemoveOverrides(
+        this IMutableForeignKey foreignKey,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => RelationalForeignKeyOverrides.Remove(foreignKey, new StoreObjectPair(storeObject, principalStoreObject));
+
+    /// <summary>
+    ///     Removes the per-store-object-pair constraint name override for the given pair of dependent and principal store objects.
+    /// </summary>
+    /// <param name="foreignKey">The foreign key.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The removed override, or <see langword="null" /> if none was configured.</returns>
+    public static IConventionRelationalForeignKeyOverrides? RemoveOverrides(
+        this IConventionForeignKey foreignKey,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => RelationalForeignKeyOverrides.Remove((IMutableForeignKey)foreignKey, new StoreObjectPair(storeObject, principalStoreObject));
 
     /// <summary>
     ///     Gets the foreign key constraints to which the foreign key is mapped.

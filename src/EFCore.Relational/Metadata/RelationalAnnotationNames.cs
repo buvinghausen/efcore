@@ -325,6 +325,16 @@ public static class RelationalAnnotationNames
     public const string RelationalOverrides = Prefix + "RelationalOverrides";
 
     /// <summary>
+    ///     The name for per-store-object key constraint name overrides.
+    /// </summary>
+    public const string KeyOverrides = Prefix + "KeyOverrides";
+
+    /// <summary>
+    ///     The name for per-store-object-pair foreign key constraint name overrides.
+    /// </summary>
+    public const string ForeignKeyOverrides = Prefix + "ForeignKeyOverrides";
+
+    /// <summary>
     ///     The name for relational model dependencies annotation.
     /// </summary>
     public const string ModelDependencies = Prefix + "ModelDependencies";
@@ -441,6 +451,8 @@ public static class RelationalAnnotationNames
         UniqueConstraintMappings,
         MappingFragments,
         RelationalOverrides,
+        KeyOverrides,
+        ForeignKeyOverrides,
         ModelDependencies,
         FieldValueGetter,
         ContainerColumnName,

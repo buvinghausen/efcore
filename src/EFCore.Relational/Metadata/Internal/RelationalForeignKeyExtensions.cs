@@ -177,6 +177,16 @@ public static class RelationalForeignKeyExtensions
         }
 
         var defaultName = foreignKey.GetDefaultName(storeObject, principalStoreObject, logger);
+
+        // Gated on defaultName: an override only applies where the constraint actually materializes,
+        // which keeps override storage from inventing constraints on unmapped store objects.
+        if (defaultName != null
+            && RelationalForeignKeyOverrides.Find(foreignKey, new StoreObjectPair(storeObject, principalStoreObject))
+                is { IsNameOverridden: true } overrides)
+        {
+            return overrides.Name ?? defaultName;
+        }
+
         var annotation = foreignKey.FindAnnotation(RelationalAnnotationNames.Name);
         return annotation != null && defaultName != null
             ? (string?)annotation.Value
@@ -213,6 +223,7 @@ public static class RelationalForeignKeyExtensions
                 var derivedTables = foreignKey.DeclaringEntityType.GetDerivedTypes()
                     .Select(t => StoreObjectIdentifier.Create(t, StoreObjectType.Table))
                     .Where(t => t != null);
+
                 if (foreignKey.GetConstraintName() != null
                     && derivedTables.All(t => foreignKey.GetConstraintName(
                             t!.Value,
@@ -261,6 +272,21 @@ public static class RelationalForeignKeyExtensions
                         && propertyNames.SequenceEqual(otherColumnNames)
                         && principalPropertyNames.SequenceEqual(otherPrincipalColumnNames))
                     {
+                        // Per-store-object overrides propagate across the shared-table link the
+                        // same way the global name annotation does just below: when the linked
+                        // foreign key carries an override for this same (dependent, principal)
+                        // pair, that is the name the two foreign keys must resolve to together, or
+                        // one database constraint would end up represented by two different names.
+                        // An override present but explicitly null (IsNameOverridden: true, Name:
+                        // null) is a deliberate opt-out of forcing a name here, so it falls through
+                        // to the global-annotation check and, after that, the traversal below --
+                        // exactly like having no override at all.
+                        if (RelationalForeignKeyOverrides.Find(otherForeignKey, new StoreObjectPair(storeObject, principalStoreObject))
+                            is { IsNameOverridden: true, Name: { } overriddenName })
+                        {
+                            return overriddenName;
+                        }
+
                         var nameAnnotation = otherForeignKey.FindAnnotation(RelationalAnnotationNames.Name);
                         if (nameAnnotation != null)
                         {

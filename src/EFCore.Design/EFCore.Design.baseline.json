@@ -307,6 +307,12 @@
           "Member": "virtual void GenerateForeignKeyAnnotations(string foreignKeyBuilderName, Microsoft.EntityFrameworkCore.Metadata.IForeignKey foreignKey, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
         },
         {
+          "Member": "virtual void GenerateForeignKeyOverrides(Microsoft.EntityFrameworkCore.Metadata.IForeignKey foreignKey, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
+        },
+        {
+          "Member": "virtual void GenerateForeignKeyOverridesAnnotations(string foreignKeyExpression, Microsoft.EntityFrameworkCore.Metadata.IForeignKey foreignKey, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
+        },
+        {
           "Member": "virtual void GenerateForeignKeys(string entityTypeBuilderName, System.Collections.Generic.IEnumerable<Microsoft.EntityFrameworkCore.Metadata.IForeignKey> foreignKeys, Microsoft.EntityFrameworkCore.Migrations.Design.CSharpSnapshotGeneratorParameters parameters);"
         },
         {
@@ -317,6 +323,12 @@
         },
         {
           "Member": "virtual void GenerateKey(string entityTypeBuilderName, Microsoft.EntityFrameworkCore.Metadata.IKey key, Microsoft.EntityFrameworkCore.Migrations.Design.CSharpSnapshotGeneratorParameters parameters, bool primary = false);"
+        },
+        {
+          "Member": "virtual void GenerateKeyOverrides(string keyBuilderName, Microsoft.EntityFrameworkCore.Metadata.IKey key, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
+        },
+        {
+          "Member": "virtual void GenerateKeyOverridesAnnotations(string keyBuilderName, Microsoft.EntityFrameworkCore.Metadata.IRelationalKeyOverrides overrides, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
         },
         {
           "Member": "virtual void GenerateKeys(string entityTypeBuilderName, System.Collections.Generic.IEnumerable<Microsoft.EntityFrameworkCore.Metadata.IKey> keys, Microsoft.EntityFrameworkCore.Metadata.IKey? primaryKey, Microsoft.EntityFrameworkCore.Migrations.Design.CSharpSnapshotGeneratorParameters parameters);"
@@ -368,6 +380,9 @@
         },
         {
           "Member": "virtual void GenerateTriggers(string tableBuilderName, Microsoft.EntityFrameworkCore.Metadata.IEntityType entityType, string table, string? schema, Microsoft.EntityFrameworkCore.Infrastructure.IndentedStringBuilder stringBuilder);"
+        },
+        {
+          "Member": "virtual string GetForeignKeyExpression(string entityTypeBuilderName, Microsoft.EntityFrameworkCore.Metadata.IForeignKey foreignKey);"
         }
       ],
       "Properties": [

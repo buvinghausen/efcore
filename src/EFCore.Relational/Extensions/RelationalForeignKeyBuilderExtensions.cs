@@ -3,6 +3,8 @@
 
 // ReSharper disable once CheckNamespace
 
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
+
 namespace Microsoft.EntityFrameworkCore;
 
 /// <summary>
@@ -53,6 +55,79 @@ public static class RelationalForeignKeyBuilderExtensions
             name);
 
     /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceCollectionBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    public static ReferenceCollectionBuilder HasConstraintName(
+        this ReferenceCollectionBuilder referenceCollectionBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+    {
+        Check.NullButNotEmpty(name);
+
+        referenceCollectionBuilder.Metadata.SetConstraintName(name, storeObject, principalStoreObject);
+
+        return referenceCollectionBuilder;
+    }
+
+    /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceCollectionBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    /// <typeparam name="TEntity">The principal entity type in this relationship.</typeparam>
+    /// <typeparam name="TRelatedEntity">The dependent entity type in this relationship.</typeparam>
+    public static ReferenceCollectionBuilder<TEntity, TRelatedEntity> HasConstraintName<TEntity, TRelatedEntity>(
+        this ReferenceCollectionBuilder<TEntity, TRelatedEntity> referenceCollectionBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        where TEntity : class
+        where TRelatedEntity : class
+        => (ReferenceCollectionBuilder<TEntity, TRelatedEntity>)((ReferenceCollectionBuilder)referenceCollectionBuilder).HasConstraintName(
+            name, storeObject, principalStoreObject);
+
+    /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceCollectionBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this ReferenceCollectionBuilder referenceCollectionBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                referenceCollectionBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.
     /// </summary>
     /// <remarks>
@@ -92,6 +167,79 @@ public static class RelationalForeignKeyBuilderExtensions
             name);
 
     /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceReferenceBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    public static ReferenceReferenceBuilder HasConstraintName(
+        this ReferenceReferenceBuilder referenceReferenceBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+    {
+        Check.NullButNotEmpty(name);
+
+        referenceReferenceBuilder.Metadata.SetConstraintName(name, storeObject, principalStoreObject);
+
+        return referenceReferenceBuilder;
+    }
+
+    /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceReferenceBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    /// <typeparam name="TEntity">The entity type on one end of the relationship.</typeparam>
+    /// <typeparam name="TRelatedEntity">The entity type on the other end of the relationship.</typeparam>
+    public static ReferenceReferenceBuilder<TEntity, TRelatedEntity> HasConstraintName<TEntity, TRelatedEntity>(
+        this ReferenceReferenceBuilder<TEntity, TRelatedEntity> referenceReferenceBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        where TEntity : class
+        where TRelatedEntity : class
+        => (ReferenceReferenceBuilder<TEntity, TRelatedEntity>)((ReferenceReferenceBuilder)referenceReferenceBuilder).HasConstraintName(
+            name, storeObject, principalStoreObject);
+
+    /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="referenceReferenceBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this ReferenceReferenceBuilder referenceReferenceBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                referenceReferenceBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.
     /// </summary>
     /// <remarks>
@@ -128,6 +276,79 @@ public static class RelationalForeignKeyBuilderExtensions
         where TEntity : class
         where TDependentEntity : class
         => (OwnershipBuilder<TEntity, TDependentEntity>)((OwnershipBuilder)ownershipBuilder).HasConstraintName(name);
+
+    /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="ownershipBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    public static OwnershipBuilder HasConstraintName(
+        this OwnershipBuilder ownershipBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+    {
+        Check.NullButNotEmpty(name);
+
+        ownershipBuilder.Metadata.SetConstraintName(name, storeObject, principalStoreObject);
+
+        return ownershipBuilder;
+    }
+
+    /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="ownershipBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+    /// <typeparam name="TEntity">The entity type on one end of the relationship.</typeparam>
+    /// <typeparam name="TDependentEntity">The entity type on the other end of the relationship.</typeparam>
+    public static OwnershipBuilder<TEntity, TDependentEntity> HasConstraintName<TEntity, TDependentEntity>(
+        this OwnershipBuilder<TEntity, TDependentEntity> ownershipBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        where TEntity : class
+        where TDependentEntity : class
+        => (OwnershipBuilder<TEntity, TDependentEntity>)((OwnershipBuilder)ownershipBuilder).HasConstraintName(
+            name, storeObject, principalStoreObject);
+
+    /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object foreign key constraint
+    ///     override, such as an annotation that applies only to that pair of dependent and principal
+    ///     store objects, without necessarily also configuring the name for that pair.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="ownershipBuilder">The builder being used to configure the relationship.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <returns>A builder to configure the foreign key constraint override for the pair.</returns>
+    public static ForeignKeyOverridesBuilder HasOverrides(
+        this OwnershipBuilder ownershipBuilder,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject)
+        => new(
+            RelationalForeignKeyOverrides.GetOrCreate(
+                ownershipBuilder.Metadata, new StoreObjectPair(storeObject, principalStoreObject), ConfigurationSource.Explicit));
 
     /// <summary>
     ///     Configures the foreign key constraint name for this relationship when targeting a relational database.
@@ -172,6 +393,78 @@ public static class RelationalForeignKeyBuilderExtensions
         string? name,
         bool fromDataAnnotation = false)
         => relationship.CanSetAnnotation(RelationalAnnotationNames.Name, name, fromDataAnnotation);
+
+    /// <summary>
+    ///     Configures the foreign key constraint name for this relationship for a particular pair of dependent and principal
+    ///     store objects.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="relationship">The builder being used to configure the relationship.</param>
+    /// <param name="name">
+    ///     The name of the foreign key constraint. Use <see langword="null" /> to suppress a globally configured name for this pair.
+    /// </param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns>
+    ///     The same builder instance if the configuration was applied,
+    ///     <see langword="null" /> otherwise.
+    /// </returns>
+    public static IConventionForeignKeyBuilder? HasConstraintName(
+        this IConventionForeignKeyBuilder relationship,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject,
+        bool fromDataAnnotation = false)
+    {
+        if (!relationship.CanSetConstraintName(name, storeObject, principalStoreObject, fromDataAnnotation))
+        {
+            return null;
+        }
+
+        relationship.Metadata.SetConstraintName(name, storeObject, principalStoreObject, fromDataAnnotation);
+        return relationship;
+    }
+
+    /// <summary>
+    ///     Returns a value indicating whether the foreign key constraint name can be set for this relationship for a particular
+    ///     pair of dependent and principal store objects from the current configuration source.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-modeling">Modeling entity types and relationships</see> for more information and examples.
+    /// </remarks>
+    /// <param name="relationship">The builder being used to configure the relationship.</param>
+    /// <param name="name">The name of the foreign key constraint.</param>
+    /// <param name="storeObject">The identifier of the dependent store object.</param>
+    /// <param name="principalStoreObject">The identifier of the principal store object.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns><see langword="true" /> if the configuration can be applied.</returns>
+    public static bool CanSetConstraintName(
+        this IConventionForeignKeyBuilder relationship,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        in StoreObjectIdentifier principalStoreObject,
+        bool fromDataAnnotation = false)
+    {
+        var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
+
+        if (configurationSource.Overrides(
+                relationship.Metadata.GetConstraintNameConfigurationSource(storeObject, principalStoreObject)))
+        {
+            return true;
+        }
+
+        // See the identical comment in RelationalKeyBuilderExtensions.CanSetName: compare the
+        // stored override name, not the resolved one, or an explicit-null override gets silently
+        // clobbered by a lower-priority convention proposing the same default name.
+        var overrides = RelationalForeignKeyOverrides.Find(
+            relationship.Metadata, new StoreObjectPair(storeObject, principalStoreObject));
+        return overrides == null
+            ? relationship.Metadata.GetConstraintName(storeObject, principalStoreObject) == name
+            : overrides.Name == name;
+    }
 
     /// <summary>
     ///     Configures whether the foreign key constraint is excluded from migrations

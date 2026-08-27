@@ -3,6 +3,8 @@
 
 // ReSharper disable once CheckNamespace
 
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
+
 namespace Microsoft.EntityFrameworkCore;
 
 /// <summary>
@@ -46,6 +48,56 @@ public static class RelationalKeyBuilderExtensions
         => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name);
 
     /// <summary>
+    ///     Configures the name of the key constraint in the database for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to further configure the key.</returns>
+    public static KeyBuilder HasName(this KeyBuilder keyBuilder, string? name, in StoreObjectIdentifier storeObject)
+    {
+        Check.NullButNotEmpty(name);
+
+        keyBuilder.Metadata.SetName(name, storeObject);
+
+        return keyBuilder;
+    }
+
+    /// <summary>
+    ///     Configures the name of the key constraint in the database for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <typeparam name="TEntity">The entity type being configured.</typeparam>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to further configure the key.</returns>
+    public static KeyBuilder<TEntity> HasName<TEntity>(
+        this KeyBuilder<TEntity> keyBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject)
+        => (KeyBuilder<TEntity>)((KeyBuilder)keyBuilder).HasName(name, storeObject);
+
+    /// <summary>
+    ///     Returns a builder that can be used to configure a per-store-object key constraint override,
+    ///     such as an annotation that applies only to that table, without necessarily also configuring
+    ///     the name for that table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <returns>A builder to configure the key constraint override for the table.</returns>
+    public static KeyOverridesBuilder HasOverrides(this KeyBuilder keyBuilder, in StoreObjectIdentifier storeObject)
+        => new(RelationalKeyOverrides.GetOrCreate(keyBuilder.Metadata, storeObject, ConfigurationSource.Explicit));
+
+    /// <summary>
     ///     Configures the name of the key constraint in the database when targeting a relational database.
     /// </summary>
     /// <remarks>
@@ -87,4 +139,69 @@ public static class RelationalKeyBuilderExtensions
         string? name,
         bool fromDataAnnotation = false)
         => keyBuilder.CanSetAnnotation(RelationalAnnotationNames.Name, name, fromDataAnnotation);
+
+    /// <summary>
+    ///     Configures the name of the key constraint in the database for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key. Use <see langword="null" /> to suppress a globally configured name for this table.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns>
+    ///     The same builder instance if the configuration was applied,
+    ///     <see langword="null" /> otherwise.
+    /// </returns>
+    public static IConventionKeyBuilder? HasName(
+        this IConventionKeyBuilder keyBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        bool fromDataAnnotation = false)
+    {
+        if (!keyBuilder.CanSetName(name, storeObject, fromDataAnnotation))
+        {
+            return null;
+        }
+
+        keyBuilder.Metadata.SetName(name, storeObject, fromDataAnnotation);
+        return keyBuilder;
+    }
+
+    /// <summary>
+    ///     Returns a value indicating whether the given name can be set for the key constraint for a particular table.
+    /// </summary>
+    /// <remarks>
+    ///     See <see href="https://aka.ms/efcore-docs-keys">Keys</see> for more information and examples.
+    /// </remarks>
+    /// <param name="keyBuilder">The builder for the key being configured.</param>
+    /// <param name="name">The name of the key.</param>
+    /// <param name="storeObject">The identifier of the table.</param>
+    /// <param name="fromDataAnnotation">Indicates whether the configuration was specified using a data annotation.</param>
+    /// <returns><see langword="true" /> if the given name can be set for the key constraint.</returns>
+    public static bool CanSetName(
+        this IConventionKeyBuilder keyBuilder,
+        string? name,
+        in StoreObjectIdentifier storeObject,
+        bool fromDataAnnotation = false)
+    {
+        var configurationSource = fromDataAnnotation ? ConfigurationSource.DataAnnotation : ConfigurationSource.Convention;
+
+        if (configurationSource.Overrides(keyBuilder.Metadata.GetNameConfigurationSource(storeObject)))
+        {
+            return true;
+        }
+
+        // When an override already exists, its *stored* name is what a same-or-lower-source write
+        // must match -- not the resolved name. GetName(storeObject) resolves an explicit-null
+        // override to the default name, which would otherwise make a convention proposing that
+        // same default name indistinguishable from a real match, letting HasName silently replace
+        // "IsNameOverridden: true, Name: null" with a concrete value. When there is no override at
+        // all, there is no stored value to compare, so the resolved-name comparison is correct.
+        var overrides = RelationalKeyOverrides.Find(keyBuilder.Metadata, storeObject);
+        return overrides == null
+            ? keyBuilder.Metadata.GetName(storeObject) == name
+            : overrides.Name == name;
+    }
 }

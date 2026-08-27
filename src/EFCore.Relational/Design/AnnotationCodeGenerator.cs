@@ -35,6 +35,8 @@ public class AnnotationCodeGenerator : IAnnotationCodeGenerator
         RelationalAnnotationNames.UpdateStoredProcedure,
         RelationalAnnotationNames.MappingFragments,
         RelationalAnnotationNames.RelationalOverrides,
+        RelationalAnnotationNames.KeyOverrides,
+        RelationalAnnotationNames.ForeignKeyOverrides,
         RelationalAnnotationNames.JsonElementMappings
     };
 
@@ -517,6 +519,30 @@ public class AnnotationCodeGenerator : IAnnotationCodeGenerator
 
     /// <inheritdoc />
     public virtual IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
+        IRelationalKeyOverrides overrides,
+        IDictionary<string, IAnnotation> annotations)
+    {
+        var methodCallCodeFragments = new List<MethodCallCodeFragment>();
+
+        methodCallCodeFragments.AddRange(GenerateFluentApiCallsHelper(overrides, annotations, GenerateFluentApi));
+
+        return methodCallCodeFragments;
+    }
+
+    /// <inheritdoc />
+    public virtual IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
+        IRelationalForeignKeyOverrides overrides,
+        IDictionary<string, IAnnotation> annotations)
+    {
+        var methodCallCodeFragments = new List<MethodCallCodeFragment>();
+
+        methodCallCodeFragments.AddRange(GenerateFluentApiCallsHelper(overrides, annotations, GenerateFluentApi));
+
+        return methodCallCodeFragments;
+    }
+
+    /// <inheritdoc />
+    public virtual IReadOnlyList<MethodCallCodeFragment> GenerateFluentApiCalls(
         ISequence sequence,
         IDictionary<string, IAnnotation> annotations)
     {
@@ -951,6 +977,32 @@ public class AnnotationCodeGenerator : IAnnotationCodeGenerator
     /// <param name="annotation">The <see cref="IAnnotation" />.</param>
     /// <returns><see langword="null" />.</returns>
     protected virtual MethodCallCodeFragment? GenerateFluentApi(IRelationalPropertyOverrides overrides, IAnnotation annotation)
+        => null;
+
+    /// <summary>
+    ///     Returns a fluent API call for the given <paramref name="annotation" />, or <see langword="null" />
+    ///     if no fluent API call exists for it.
+    /// </summary>
+    /// <remarks>
+    ///     The default implementation always returns <see langword="null" />.
+    /// </remarks>
+    /// <param name="overrides">The <see cref="IRelationalKeyOverrides" />.</param>
+    /// <param name="annotation">The <see cref="IAnnotation" />.</param>
+    /// <returns><see langword="null" />.</returns>
+    protected virtual MethodCallCodeFragment? GenerateFluentApi(IRelationalKeyOverrides overrides, IAnnotation annotation)
+        => null;
+
+    /// <summary>
+    ///     Returns a fluent API call for the given <paramref name="annotation" />, or <see langword="null" />
+    ///     if no fluent API call exists for it.
+    /// </summary>
+    /// <remarks>
+    ///     The default implementation always returns <see langword="null" />.
+    /// </remarks>
+    /// <param name="overrides">The <see cref="IRelationalForeignKeyOverrides" />.</param>
+    /// <param name="annotation">The <see cref="IAnnotation" />.</param>
+    /// <returns><see langword="null" />.</returns>
+    protected virtual MethodCallCodeFragment? GenerateFluentApi(IRelationalForeignKeyOverrides overrides, IAnnotation annotation)
         => null;
 
     /// <summary>
